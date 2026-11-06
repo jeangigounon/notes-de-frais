@@ -1,0 +1,310 @@
+// Clients : liste et fiche (e-mail, format Excel attendu, pièces jointes).
+
+import { state, activeClients, getClient, newClient, saveClient, deleteClient } from '../store.js';
+import { esc, icon, toast, confirmDialog, debounce, download, isCompact, blobToBase64, pickFile } from '../ui.js';
+import { CLIENT_COLORS, LINE_FIELDS, PLACEHOLDERS, DEFAULT_SIMPLE_COLUMNS, fieldDef, sampleExpenses } from '../fields.js';
+import { openWorkbook, readSheet, templateCapacity } from '../xlsx.js';
+import { makeReport, buildAttachments } from '../mail.js';
+import { openMapper } from './mapper.js';
+import { initials } from './home.js';
+
+export const deps = ['clients'];
+
+export function onStoreChange(what, detail, page, params) {
+  if (what !== 'clients') return false;
+  // La fiche ouverte se met à jour elle-même : on ne rafraîchit que la liste.
+  if (detail.source === 'editor') {
+    const list = page.querySelector('[data-client-list]');
+    if (list) list.innerHTML = listHtml(params[0]);
+    return true;
+  }
+  return false;
+}
+
+function listHtml(currentId) {
+  const clients = activeClients();
+  if (!clients.length) return '<div class="row"><span class="row-sub">Aucun client pour l’instant.</span></div>';
+  return clients.map(c => `
+    <a class="row row-btn ${c.id === currentId ? 'current' : ''}" href="#/clients/${c.id}">
+      <span class="avatar" style="background:${CLIENT_COLORS[c.color] || CLIENT_COLORS.blue}">${esc(initials(c.name))}</span>
+      <span class="row-main"><span class="row-title">${esc(c.name || 'Sans nom')}</span><span class="row-sub">${esc(c.to || 'Pas encore d’adresse')}</span></span>
+      ${icon('chevronRight', 'chev')}
+    </a>`).join('');
+}
+
+export function render(page, params) {
+  const id = params[0];
+  const client = id ? getClient(id) : null;
+  if (id && !client) { location.hash = '#/clients'; return; }
+  const compact = isCompact();
+
+  if (compact && client) {
+    page.innerHTML = `<a class="back-link" href="#/clients">${icon('chevronLeft')}Clients</a><div data-editor></div>`;
+    renderEditor(page.querySelector('[data-editor]'), client);
+    bindNew(page);
+    return;
+  }
+
+  page.innerHTML = `
+    <header class="page-head">
+      <div><h1 class="large-title">Clients</h1><p class="subtitle">À qui envoyer vos notes de frais, et sous quelle forme.</p></div>
+      <button type="button" class="btn btn-primary" data-act="new">${icon('plus')}Nouveau client</button>
+    </header>
+    <div class="split">
+      <div class="split-list"><div class="list" data-client-list>${listHtml(id)}</div></div>
+      <div class="split-detail" data-editor>${client ? '' : compact ? '' : `
+        <div class="empty">${icon('users')}<h3>${activeClients().length ? 'Choisissez un client' : 'Ajoutez votre premier client'}</h3>
+        <p>Pour chaque client : son adresse e-mail, le message type et le fichier Excel qu'il attend.</p>
+        ${activeClients().length ? '' : `<button type="button" class="btn btn-primary" data-act="new">${icon('plus')}Nouveau client</button>`}</div>`}
+      </div>
+    </div>`;
+  if (client) renderEditor(page.querySelector('[data-editor]'), client);
+  bindNew(page);
+}
+
+function bindNew(page) {
+  page.addEventListener('click', e => {
+    if (!e.target.closest('[data-act="new"]')) return;
+    const c = newClient();
+    saveClient(c);
+    location.hash = `#/clients/${c.id}`;
+    setTimeout(() => document.querySelector('[data-k="name"]')?.focus(), 80);
+  });
+}
+
+/* ---------- Fiche client ---------- */
+
+function templateSummary(tpl) {
+  const single = Object.keys(tpl.cells || {}).length;
+  const lines = Object.keys(tpl.lineCols || {}).length;
+  const parts = [];
+  if (lines) parts.push(`tableau à partir de la ligne ${tpl.lineRow} (${lines} colonne${lines > 1 ? 's' : ''})`);
+  if (single) parts.push(`${single} cellule${single > 1 ? 's' : ''} unique${single > 1 ? 's' : ''}`);
+  return parts.length ? parts.join(' · ') : 'Aucune cellule configurée';
+}
+
+function renderEditor(host, client) {
+  const c = structuredClone(client);
+  c.excel ||= { mode: 'simple', fileName: 'Note de frais {nom} {periode}', simple: { title: 'Note de frais', columns: DEFAULT_SIMPLE_COLUMNS.map(x => ({ ...x })) }, template: null };
+  c.excel.simple ||= { title: 'Note de frais', columns: DEFAULT_SIMPLE_COLUMNS.map(x => ({ ...x })) };
+
+  const save = debounce(() => {
+    try {
+      saveClient(structuredClone(c), { source: 'editor' });
+      const ind = host.querySelector('[data-saved]');
+      if (ind) { ind.classList.add('show'); clearTimeout(ind._t); ind._t = setTimeout(() => ind.classList.remove('show'), 1600); }
+    } catch (err) {
+      toast(err.message, { type: 'error' });
+    }
+  }, 350);
+
+  const draw = () => {
+    const mode = c.excel.mode;
+    const tpl = c.excel.template;
+    host.innerHTML = `
+      <div class="editor-head">
+        <span class="avatar xl" style="background:${CLIENT_COLORS[c.color] || CLIENT_COLORS.blue}">${esc(initials(c.name))}</span>
+        <div class="editor-title">
+          <h2>${esc(c.name || 'Nouveau client')}</h2>
+          <span class="saved" data-saved>${icon('check')}Enregistré</span>
+        </div>
+      </div>
+
+      <h3 class="group-label">Client</h3>
+      <div class="list form">
+        <label class="field"><span>Nom</span><input data-k="name" autocomplete="off" placeholder="Ex. Comptabilité ACME" value="${esc(c.name)}"></label>
+        <label class="field"><span>Société</span><input data-k="company" autocomplete="off" placeholder="Facultatif" value="${esc(c.company)}"></label>
+        <div class="field"><span>Couleur</span><div class="colors">${Object.entries(CLIENT_COLORS).map(([k, v]) => `<button type="button" class="${c.color === k ? 'on' : ''}" data-color="${k}" style="background:${v};color:${v}" aria-label="${k}"></button>`).join('')}</div></div>
+      </div>
+
+      <h3 class="group-label">E-mail</h3>
+      <div class="list form">
+        <label class="field"><span>À</span><input data-k="to" inputmode="email" autocomplete="off" placeholder="compta@client.be" value="${esc(c.to)}"></label>
+        <label class="field"><span>Cc</span><input data-k="cc" inputmode="email" autocomplete="off" placeholder="Facultatif" value="${esc(c.cc)}"></label>
+        <label class="field"><span>Objet</span><input data-k="subject" autocomplete="off" value="${esc(c.subject)}"></label>
+        <label class="field stack"><span>Message</span><textarea data-k="body" rows="6">${esc(c.body)}</textarea></label>
+      </div>
+      <p class="group-foot">Variables remplacées automatiquement : ${PLACEHOLDERS.map(([k, d]) => `<button type="button" class="var" data-var="${k}" title="${esc(d)}">${k}</button>`).join(' ')}</p>
+
+      <h3 class="group-label">Fichier Excel demandé</h3>
+      <div class="seg block" role="tablist">
+        <button type="button" data-mode="template" class="${mode === 'template' ? 'on' : ''}">Son modèle</button>
+        <button type="button" data-mode="simple" class="${mode === 'simple' ? 'on' : ''}">Tableau standard</button>
+        <button type="button" data-mode="none" class="${mode === 'none' ? 'on' : ''}">Pas d'Excel</button>
+      </div>
+
+      ${mode === 'template' ? (tpl ? `
+        <div class="list tpl-card">
+          <div class="row">
+            <span class="att-icon xl">${icon('table')}</span>
+            <span class="row-main"><span class="row-title">${esc(tpl.name)}</span><span class="row-sub">Feuille « ${esc(tpl.sheet)} » · ${esc(templateSummary(tpl))}</span></span>
+          </div>
+          ${!tpl.lineRow ? `<div class="row"><span class="att-icon warn">${icon('alert')}</span><span class="row-sub">Indiquez où commence le tableau des dépenses : cliquez sur une cellule de la première ligne vide et choisissez un champ « Par justificatif ».</span></div>` : ''}
+          <div class="row tpl-actions">
+            <button type="button" class="btn btn-primary" data-act="map">${icon('grid')}Configurer les cellules</button>
+            <button type="button" class="btn btn-secondary" data-act="replace">Remplacer le fichier</button>
+            <button type="button" class="btn btn-plain danger" data-act="remove-tpl">Retirer</button>
+          </div>
+        </div>` : `
+        <div class="dropzone" data-dropzone data-act="upload">
+          ${icon('table')}
+          <strong>Déposez ici le fichier Excel du client</strong>
+          <span>ou cliquez pour le choisir (.xlsx). Vous indiquerez ensuite quelle cellule reçoit quelle information.</span>
+        </div>`) : ''}
+
+      ${mode === 'simple' ? `
+        <div class="list form">
+          <label class="field"><span>Titre</span><input data-simple="title" autocomplete="off" value="${esc(c.excel.simple.title)}"></label>
+        </div>
+        <h3 class="group-label">Colonnes</h3>
+        <div class="list cols-list">
+          ${c.excel.simple.columns.map((col, i) => `
+            <div class="field col-row">
+              <span class="col-field">${esc(fieldDef(col.field)?.label || col.field)}</span>
+              <input data-col-label="${i}" value="${esc(col.label)}" aria-label="Titre de la colonne">
+              <span class="col-tools">
+                <button type="button" class="btn-icon" data-col-up="${i}" ${i === 0 ? 'disabled' : ''} aria-label="Monter">${icon('arrowUp')}</button>
+                <button type="button" class="btn-icon" data-col-down="${i}" ${i === c.excel.simple.columns.length - 1 ? 'disabled' : ''} aria-label="Descendre">${icon('arrowDown')}</button>
+                <button type="button" class="btn-icon danger" data-col-del="${i}" aria-label="Retirer">${icon('x')}</button>
+              </span>
+            </div>`).join('')}
+          <label class="field"><span>Ajouter</span>
+            <select data-col-add><option value="">Choisir une colonne…</option>${LINE_FIELDS.filter(f => !c.excel.simple.columns.some(x => x.field === f.key)).map(f => `<option value="${f.key}">${esc(f.label)}</option>`).join('')}</select>
+          </label>
+        </div>` : ''}
+
+      ${mode !== 'none' ? `
+        <div class="list form" style="margin-top:16px">
+          <label class="field"><span>Nom du fichier</span><input data-excel="fileName" autocomplete="off" value="${esc(c.excel.fileName)}"></label>
+        </div>
+        <button type="button" class="btn btn-secondary test-btn" data-act="sample">${icon('download')}Tester avec des données d'exemple</button>` : ''}
+
+      <h3 class="group-label">Pièces jointes</h3>
+      <div class="list form">
+        <label class="field"><span>Joindre les photos et PDF des justificatifs</span><span class="switch"><input type="checkbox" data-k="attachReceipts" ${c.attachReceipts !== false ? 'checked' : ''}><span></span></span></label>
+      </div>
+
+      <h3 class="group-label">Notes</h3>
+      <div class="list form">
+        <label class="field stack"><textarea data-k="notes" rows="3" placeholder="Ex. à envoyer avant le 5 du mois, code projet…">${esc(c.notes)}</textarea></label>
+      </div>
+
+      <button type="button" class="btn btn-plain danger delete-btn" data-act="delete">${icon('trash')}Supprimer ce client</button>
+    `;
+  };
+
+  draw();
+
+  async function loadTemplate(file) {
+    if (!file) return;
+    if (!/\.xlsx$/i.test(file.name)) {
+      toast(/\.xls$/i.test(file.name) ? 'Ouvrez ce fichier .xls dans Excel et enregistrez-le au format .xlsx' : 'Choisissez un fichier Excel .xlsx', { type: 'error', duration: 5000 });
+      return;
+    }
+    if (file.size > 1_500_000) { toast('Ce modèle est trop lourd (1,5 Mo maximum).', { type: 'error' }); return; }
+    try {
+      const data = await blobToBase64(file);
+      const book = await openWorkbook(data);
+      const visible = book.sheets.find(s => !s.hidden) || book.sheets[0];
+      const prev = c.excel.template;
+      c.excel.template = { name: file.name, data, sheet: visible.name, cells: prev?.cells || {}, lineRow: prev?.lineRow || null, lineCols: prev?.lineCols || {}, capacity: null };
+      if (!c.excel.fileName || c.excel.fileName === 'Note de frais {nom} {periode}') c.excel.fileName = file.name.replace(/\.xlsx$/i, '') + ' {periode}';
+      save.flush();
+      draw();
+      openMapper(c, () => { save.flush(); draw(); });
+    } catch (err) {
+      toast(err.message, { type: 'error', duration: 5000 });
+    }
+  }
+
+  host.oninput = e => {
+    const t = e.target;
+    if (t.dataset.k) {
+      c[t.dataset.k] = t.type === 'checkbox' ? t.checked : t.value;
+      if (t.dataset.k === 'name') {
+        host.querySelector('.editor-title h2').textContent = t.value || 'Nouveau client';
+        host.querySelector('.editor-head .avatar').textContent = initials(t.value);
+      }
+    } else if (t.dataset.simple) c.excel.simple[t.dataset.simple] = t.value;
+    else if (t.dataset.excel) c.excel[t.dataset.excel] = t.value;
+    else if (t.dataset.colLabel != null) c.excel.simple.columns[+t.dataset.colLabel].label = t.value;
+    else return;
+    save();
+  };
+
+  host.onchange = e => {
+    const t = e.target;
+    if (t.matches('[data-col-add]') && t.value) {
+      const def = fieldDef(t.value);
+      c.excel.simple.columns.push({ field: def.key, label: def.label });
+      save.flush();
+      draw();
+    } else if (t.type === 'checkbox') host.oninput(e);
+  };
+
+  host.onclick = async e => {
+    const t = e.target.closest('button, [data-act]');
+    if (!t) return;
+    if (t.dataset.color) { c.color = t.dataset.color; save.flush(); draw(); return; }
+    if (t.dataset.mode) { c.excel.mode = t.dataset.mode; save.flush(); draw(); return; }
+    if (t.dataset.var) {
+      const area = host.querySelector('[data-k="body"]');
+      const pos = area.selectionStart ?? area.value.length;
+      area.value = area.value.slice(0, pos) + t.dataset.var + area.value.slice(area.selectionEnd ?? pos);
+      area.focus();
+      area.setSelectionRange(pos + t.dataset.var.length, pos + t.dataset.var.length);
+      c.body = area.value;
+      save();
+      return;
+    }
+    const cols = c.excel.simple.columns;
+    if (t.dataset.colUp != null) { const i = +t.dataset.colUp; [cols[i - 1], cols[i]] = [cols[i], cols[i - 1]]; save.flush(); draw(); return; }
+    if (t.dataset.colDown != null) { const i = +t.dataset.colDown; [cols[i + 1], cols[i]] = [cols[i], cols[i + 1]]; save.flush(); draw(); return; }
+    if (t.dataset.colDel != null) { cols.splice(+t.dataset.colDel, 1); save.flush(); draw(); return; }
+
+    const act = t.dataset.act;
+    if (act === 'upload' || act === 'replace') return loadTemplate(await pickFile('.xlsx,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'));
+    if (act === 'map') return openMapper(c, () => { save.flush(); draw(); });
+    if (act === 'remove-tpl') {
+      if (await confirmDialog({ title: 'Retirer le modèle ?', message: 'La configuration des cellules sera perdue.', confirm: 'Retirer', destructive: true })) {
+        c.excel.template = null;
+        save.flush();
+        draw();
+      }
+      return;
+    }
+    if (act === 'sample') {
+      try {
+        if (c.excel.mode === 'template' && !c.excel.template) { toast('Ajoutez d’abord le modèle du client'); return; }
+        const rep = makeReport({ ...c, attachReceipts: false }, sampleExpenses());
+        const { excelFiles, warnings } = await buildAttachments({ ...c, attachReceipts: false }, rep);
+        for (const f of excelFiles) download(f.blob, f.name.replace(/\.xlsx$/, ' (exemple).xlsx'));
+        warnings.forEach(w => toast(w));
+      } catch (err) {
+        toast(err.message, { type: 'error' });
+      }
+      return;
+    }
+    if (act === 'delete') {
+      if (await confirmDialog({ title: `Supprimer ${c.name || 'ce client'} ?`, message: 'Ses justificatifs restent dans vos dépenses, sans destinataire.', confirm: 'Supprimer', destructive: true })) {
+        save.cancel();
+        deleteClient(c.id);
+        location.hash = '#/clients';
+        toast('Client supprimé');
+      }
+    }
+  };
+
+  // Glisser-déposer du modèle sur la zone prévue.
+  host.addEventListener('dragover', e => { const z = e.target.closest('[data-dropzone]'); if (z) { e.preventDefault(); z.classList.add('drag'); } });
+  host.addEventListener('dragleave', e => e.target.closest?.('[data-dropzone]')?.classList.remove('drag'));
+  host.addEventListener('drop', e => {
+    const z = e.target.closest('[data-dropzone]');
+    if (!z) return;
+    e.preventDefault();
+    z.classList.remove('drag');
+    loadTemplate(e.dataTransfer.files[0]);
+  });
+}
+
+export { templateCapacity, readSheet };
