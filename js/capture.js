@@ -20,7 +20,11 @@ function defaultClientId() {
 }
 
 export async function handleFiles(fileList, { clientId } = {}) {
-  const files = [...(fileList || [])];
+  let files = [...(fileList || [])];
+  if (files.some(f => /\.xlsx?$/i.test(f.name))) {
+    toast('Un fichier Excel est le modèle d’un client : ouvrez sa fiche (Clients) et déposez-le dans « Fichier Excel demandé ».', { duration: 6000 });
+    files = files.filter(f => !/\.xlsx?$/i.test(f.name));
+  }
   if (!files.length) return;
   navigator.storage?.persist?.().catch(() => {});
   const created = [];

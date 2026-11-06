@@ -434,6 +434,12 @@ details.more[open] > summary .i { transform: rotate(180deg); }
 .dropzone strong { color: var(--text); font-size: 16px; }
 .dropzone span { max-width: 420px; font-size: 14px; }
 .dropzone:hover, .dropzone.drag { border-color: var(--accent); background: var(--accent-soft); }
+.dropzone.compact { flex-direction: row; flex-wrap: wrap; justify-content: center; gap: 4px 10px; padding: 16px 18px; }
+.dropzone.compact .i { width: 24px; height: 24px; }
+.dropzone.compact strong { font-size: 15px; }
+.dropzone.compact span { flex-basis: 100%; font-size: 13px; }
+.ai-box.error { background: var(--orange-soft); }
+.ai-box.error .ai-box-head .i { color: var(--orange-text); }
 .drop-overlay { position: fixed; inset: 0; z-index: 95; display: none; place-items: center; background: rgba(0, 113, 227, .08); -webkit-backdrop-filter: blur(6px); backdrop-filter: blur(6px); pointer-events: none; }
 .drop-overlay.on { display: grid; }
 .drop-overlay > div { display: flex; flex-direction: column; align-items: center; gap: 12px; padding: 44px 60px; border: 2.5px dashed var(--accent); border-radius: 28px; background: var(--surface); box-shadow: var(--shadow-lg); color: var(--accent); font: 600 20px var(--font-display); }

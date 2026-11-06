@@ -2,7 +2,7 @@
 // Fichiers du site : réseau d'abord (mises à jour immédiates), cache en secours.
 // Bibliothèques externes (versions figées) : cache d'abord.
 
-const VERSION = 'ndf-v2';
+const VERSION = 'ndf-v3';
 const SHELL = [
   './',
   'index.html',
@@ -53,8 +53,10 @@ self.addEventListener('fetch', event => {
   const url = new URL(req.url);
 
   if (url.origin === self.location.origin) {
+    // « no-cache » : on revalide auprès de GitHub Pages pour ne jamais mélanger d'anciens fichiers à une mise à jour.
+    const fresh = req.mode === 'navigate' ? fetch(req.url, { cache: 'no-cache', credentials: 'same-origin' }) : fetch(req, { cache: 'no-cache' });
     event.respondWith(
-      fetch(req)
+      fresh
         .then(res => {
           if (res.ok) { const copy = res.clone(); caches.open(VERSION).then(c => c.put(req, copy)); }
           return res;

@@ -99,6 +99,16 @@ function renderEditor(host, client) {
     }
   }, 350);
 
+  // Zone de dépôt du modèle (aussi proposée, en plus discret, en mode « Tableau standard »).
+  const dropzone = (compact = false) => `
+    <div class="dropzone ${compact ? 'compact' : ''}" data-dropzone data-act="upload">
+      ${icon('table')}
+      <strong>${compact ? 'Le client a son propre fichier Excel ? Déposez-le ici' : 'Déposez ici le fichier Excel du client'}</strong>
+      <span>ou cliquez pour le choisir (.xlsx ou .xls). ${canAnalyzeTemplates()
+        ? 'Claude l’analyse et propose où placer chaque information ; vous n’avez plus qu’à vérifier.'
+        : 'Pour que Claude l’analyse automatiquement, <a href="#/reglages">ajoutez votre clé Claude dans Réglages</a> sur cet appareil (la clé est enregistrée appareil par appareil).'}</span>
+    </div>`;
+
   const draw = () => {
     const mode = c.excel.mode;
     const tpl = c.excel.template;
@@ -141,19 +151,16 @@ function renderEditor(host, client) {
             <span class="row-main"><span class="row-title">${esc(tpl.name)}</span><span class="row-sub">Feuille « ${esc(tpl.sheet)} » · ${esc(templateSummary(tpl))}</span></span>
           </div>
           ${tpl.ai?.summary ? `<div class="row ai-summary"><span class="att-icon ai">${icon('sparkles')}</span><span class="row-sub">${esc(tpl.ai.summary)}</span></div>` : ''}
-          ${!tpl.lineRow ? `<div class="row"><span class="att-icon warn">${icon('alert')}</span><span class="row-sub">Indiquez où commence le tableau des dépenses : cliquez sur une cellule de la première ligne vide et choisissez un champ « Par justificatif ».</span></div>` : ''}
+          ${tpl.ai?.error ? `<div class="row"><span class="att-icon warn">${icon('alert')}</span><span class="row-sub">L'analyse par Claude a échoué : ${esc(tpl.ai.error)}</span></div>` : ''}
+          ${!tpl.lineRow ? `<div class="row"><span class="att-icon warn">${icon('alert')}</span><span class="row-sub">Indiquez où commence le tableau des dépenses : lancez l'analyse par Claude, ou cliquez sur une cellule de la première ligne vide et choisissez un champ « Par justificatif ».</span></div>` : ''}
           <div class="row tpl-actions">
-            <button type="button" class="btn btn-primary" data-act="map">${icon('grid')}Vérifier les cellules</button>
-            ${canAnalyzeTemplates() ? `<button type="button" class="btn btn-secondary" data-act="analyze">${icon('sparkles')}Analyser avec Claude</button>` : ''}
+            <button type="button" class="btn ${tpl.lineRow ? 'btn-secondary' : 'btn-primary'}" data-act="analyze">${icon('sparkles')}${tpl.ai?.summary ? 'Analyser à nouveau' : 'Analyser avec Claude'}</button>
+            <button type="button" class="btn ${tpl.lineRow ? 'btn-primary' : 'btn-secondary'}" data-act="map">${icon('grid')}Vérifier les cellules</button>
             <button type="button" class="btn btn-secondary" data-act="replace">Remplacer</button>
             <button type="button" class="btn btn-plain danger" data-act="remove-tpl">Retirer</button>
           </div>
-        </div>` : `
-        <div class="dropzone" data-dropzone data-act="upload">
-          ${icon('table')}
-          <strong>Déposez ici le fichier Excel du client</strong>
-          <span>ou cliquez pour le choisir (.xlsx ou .xls). ${canAnalyzeTemplates() ? 'Claude l’analyse et propose où placer chaque information ; vous n’avez plus qu’à vérifier.' : 'Vous indiquerez ensuite quelle cellule reçoit quelle information (avec une clé Claude, c’est automatique).'}</span>
-        </div>`) : ''}
+        </div>` : dropzone()) : ''}
+      ${mode !== 'template' ? dropzone(true) : ''}
 
       ${mode === 'simple' ? `
         <div class="list form">
@@ -214,10 +221,34 @@ function renderEditor(host, client) {
       save.flush();
       return true;
     } catch (err) {
+      console.error(err);
+      tpl.ai = { error: err.message || String(err), at: Date.now() };
+      save.flush();
       toast(`Analyse impossible : ${err.message}`, { type: 'error', duration: 6000 });
       return false;
     } finally {
       wait.close();
+    }
+  }
+
+  async function analyzeCurrent() {
+    if (!canAnalyzeTemplates()) {
+      const go = await confirmDialog({
+        title: 'Clé Claude absente sur cet appareil',
+        message: 'La clé Claude est enregistrée appareil par appareil. Ajoutez-la dans Réglages (ou utilisez le QR code de configuration), puis relancez l’analyse.',
+        confirm: 'Ouvrir Réglages',
+      });
+      if (go) location.hash = '#/reglages';
+      return;
+    }
+    try {
+      const book = await openWorkbook(c.excel.template.data);
+      const sheet = book.sheets.find(s => s.name === c.excel.template.sheet) || book.sheets[0];
+      const ok = await runAnalysis(book, sheet);
+      draw();
+      if (ok) openMapper(c, () => { save.flush(); draw(); });
+    } catch (err) {
+      toast(err.message, { type: 'error' });
     }
   }
 
@@ -285,6 +316,7 @@ function renderEditor(host, client) {
   };
 
   host.onclick = async e => {
+    if (e.target.closest('a')) return;
     const t = e.target.closest('button, [data-act]');
     if (!t) return;
     if (t.dataset.color) { c.color = t.dataset.color; save.flush(); draw(); return; }
@@ -307,16 +339,7 @@ function renderEditor(host, client) {
     const act = t.dataset.act;
     if (act === 'upload' || act === 'replace') return loadTemplate(await pickFile('.xlsx,.xls,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,application/vnd.ms-excel'));
     if (act === 'map') return openMapper(c, () => { save.flush(); draw(); });
-    if (act === 'analyze') {
-      try {
-        const book = await openWorkbook(c.excel.template.data);
-        const sheet = book.sheets.find(s => s.name === c.excel.template.sheet) || book.sheets[0];
-        if (await runAnalysis(book, sheet)) { draw(); openMapper(c, () => { save.flush(); draw(); }); }
-      } catch (err) {
-        toast(err.message, { type: 'error' });
-      }
-      return;
-    }
+    if (act === 'analyze') return analyzeCurrent();
     if (act === 'remove-tpl') {
       if (await confirmDialog({ title: 'Retirer le modèle ?', message: 'La configuration des cellules sera perdue.', confirm: 'Retirer', destructive: true })) {
         c.excel.template = null;
@@ -347,15 +370,22 @@ function renderEditor(host, client) {
     }
   };
 
-  // Glisser-déposer du modèle sur la zone prévue.
-  host.addEventListener('dragover', e => { const z = e.target.closest('[data-dropzone]'); if (z) { e.preventDefault(); z.classList.add('drag'); } });
-  host.addEventListener('dragleave', e => e.target.closest?.('[data-dropzone]')?.classList.remove('drag'));
-  host.addEventListener('drop', e => {
-    const z = e.target.closest('[data-dropzone]');
-    if (!z) return;
+  // Un fichier Excel déposé n'importe où sur la fiche devient le modèle du client.
+  const zone = () => host.querySelector('[data-dropzone]');
+  host.addEventListener('dragover', e => {
+    if (![...(e.dataTransfer?.types || [])].includes('Files')) return;
     e.preventDefault();
-    z.classList.remove('drag');
-    loadTemplate(e.dataTransfer.files[0]);
+    zone()?.classList.add('drag');
+  });
+  host.addEventListener('dragleave', e => { if (!host.contains(e.relatedTarget)) zone()?.classList.remove('drag'); });
+  host.addEventListener('drop', e => {
+    const files = [...(e.dataTransfer?.files || [])];
+    if (!files.length) return;
+    e.preventDefault();
+    zone()?.classList.remove('drag');
+    const excel = files.find(f => /\.xlsx?$/i.test(f.name));
+    if (excel) loadTemplate(excel);
+    else toast('Déposez ici le fichier Excel du client (.xlsx ou .xls). Les tickets s’ajoutent depuis l’accueil.');
   });
 }
 
