@@ -1,11 +1,12 @@
 // Préparation et envoi de la note de frais :
 // Microsoft 365 (envoi direct via Graph), menu Partager du téléphone, brouillon Outlook (.eml) ou archive .zip.
 
-import { state } from './store.js';
+import { state, saveExpense } from './store.js';
 import { buildReport, fillPlaceholders } from './fields.js';
 import { buildSimple, fillTemplate } from './xlsx.js';
 import { getJSZip } from './lib.js';
-import { blobToBase64, safeFileName } from './ui.js';
+import { blobToBase64, safeFileName, todayISO } from './ui.js';
+import { rateToEur } from './fx.js';
 
 export const splitEmails = s => String(s || '').split(/[,;\s]+/).map(x => x.trim()).filter(Boolean);
 export const isEmail = s => /^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(s);
@@ -25,16 +26,36 @@ export function makeReport(client, expenses) {
   return buildReport(client, expenses, state.profile);
 }
 
+// Taux de change BCE du jour de chaque dépense en devise (une seule fois, puis enregistré).
+export async function ensureRates(expenses) {
+  for (const e of expenses) {
+    const cur = e.data.currency || 'EUR';
+    if (cur === 'EUR' || e.data.rate) continue;
+    try {
+      e.data.rate = await rateToEur(cur, e.data.date);
+      await saveExpense(e);
+    } catch { /* hors ligne : signalé dans les avertissements */ }
+  }
+}
+
 export async function buildAttachments(client, report) {
   const excel = client.excel || { mode: 'simple' };
   const baseName = safeFileName(fillPlaceholders(excel.fileName || 'Note de frais {nom} {periode}', report));
-  let sheets = { files: [], split: false };
-  if (excel.mode === 'template' && excel.template?.data) sheets = await fillTemplate(excel.template, report, baseName);
-  else if (excel.mode !== 'none') sheets = await buildSimple(excel.simple, report, baseName);
+  let sheets = { files: [], warnings: [] };
+  if (excel.mode === 'template' && excel.template?.data) {
+    // Cellules « taux de change » d'une devise absente de la note : taux du jour.
+    for (const m of Object.values(excel.template.cells || {})) {
+      const cur = m.field === 'fxRate' && String(m.currency || '').toUpperCase();
+      if (cur && cur !== 'EUR' && report.fx[cur] == null) {
+        try { report.fx[cur] = await rateToEur(cur, report.to || todayISO()); } catch { /* laissé vide */ }
+      }
+    }
+    sheets = await fillTemplate(excel.template, report, baseName);
+  } else if (excel.mode !== 'none') {
+    sheets = await buildSimple(excel.simple, report, baseName);
+  }
   const receipts = client.attachReceipts === false ? [] : report.items.map(it => ({ name: it.fileName, blob: it.exp.file, mime: it.exp.mime }));
-  const warnings = [];
-  if (sheets.split) warnings.push(`Le modèle ne contient que ${sheets.capacity} lignes : la note est répartie sur ${sheets.files.length} fichiers Excel.`);
-  return { files: [...sheets.files, ...receipts], excelFiles: sheets.files, receipts, warnings };
+  return { files: [...sheets.files, ...receipts], excelFiles: sheets.files, receipts, warnings: sheets.warnings || [], added: sheets.added || 0 };
 }
 
 export function preferredMethod() {

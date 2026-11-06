@@ -1,4 +1,6 @@
-// Préparation des photos : redimensionnement, compression JPEG et vignette.
+// Préparation des photos et PDF : redimensionnement, compression JPEG et vignette.
+
+import { pdfThumb } from './pdf.js';
 
 const MAX_SIDE = 2000;
 const THUMB_SIDE = 320;
@@ -43,7 +45,15 @@ const renameTo = (name, ext) => (name || 'photo').replace(/\.[^.]+$/, '') + '.' 
 export async function prepareFile(file) {
   const mime = file.type || guessMime(file.name);
   if (mime === 'application/pdf') {
-    return { blob: file, mime, name: file.name || 'document.pdf', thumb: null };
+    if (file.size > 20_000_000) throw new Error(`« ${file.name} » est trop lourd (20 Mo maximum).`);
+    let thumb = null;
+    let pages = 1;
+    try {
+      ({ thumb, pages } = await pdfThumb(file));
+    } catch (err) {
+      console.warn('Vignette PDF', err);
+    }
+    return { blob: file, mime, name: file.name || 'facture.pdf', thumb, pages };
   }
   if (!mime.startsWith('image/')) {
     throw new Error(`« ${file.name} » n'est ni une photo ni un PDF.`);

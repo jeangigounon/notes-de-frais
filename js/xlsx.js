@@ -3,9 +3,9 @@
 //   choisies ; mise en forme, logos, formules et validations restent intacts.
 // - Tableau standard : classeur sobre généré de zéro.
 
-import { getJSZip } from './lib.js';
-import { fieldDef, lineValue, singleValue, summarize, LINE_FIELDS, DEFAULT_SIMPLE_COLUMNS } from './fields.js';
-import { parseISO } from './ui.js';
+import { getJSZip, loadScript, CDN } from './lib.js';
+import { fieldDef, lineValue, singleValue, lineColDef, EUR_EQUIVALENT, LINE_FIELDS, DEFAULT_SIMPLE_COLUMNS } from './fields.js';
+import { parseISO, blobToBase64 } from './ui.js';
 
 export const XLSX_MIME = 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet';
 const NS_MAIN = 'http://schemas.openxmlformats.org/spreadsheetml/2006/main';
@@ -47,13 +47,20 @@ function textOf(el) {
   return s;
 }
 
-function resolvePart(target) {
+function resolvePart(target, base = 'xl') {
   if (target.startsWith('/')) return target.slice(1);
   const out = [];
-  for (const p of ('xl/' + target).split('/')) {
+  for (const p of (`${base}/${target}`).split('/')) {
     if (p === '..') out.pop(); else if (p && p !== '.') out.push(p);
   }
   return out.join('/');
+}
+
+const BUILTIN_FMTS = { 1: '0', 2: '0.00', 3: '#,##0', 4: '#,##0.00', 9: '0%', 10: '0.00%', 11: '0.00E+00', 14: 'dd/mm/yyyy', 15: 'd-mmm-yy', 16: 'd-mmm', 17: 'mmm-yy', 22: 'dd/mm/yyyy hh:mm', 49: '@' };
+function formatCode(styles, s) {
+  if (!styles) return '';
+  const id = styles.xfs[s] ?? 0;
+  return styles.numFmts[id] || BUILTIN_FMTS[id] || '';
 }
 
 const escXml = s => String(s).replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f]/g, '')
@@ -149,7 +156,7 @@ export async function readSheet(book, path) {
       }
       const isDate = typeof val === 'number' && book.styles && isDateFormat(book.styles.xfs[s] || 0, book.styles.numFmts);
       const display = val == null ? '' : typeof val === 'number' ? (isDate ? serialToDisplay(val) : val.toLocaleString('fr-BE', { maximumFractionDigits: 2 })) : String(val);
-      cells.set(`${p.col}${p.r}`, { ref: `${p.col}${p.r}`, r: p.r, c: p.c, val, display, formula });
+      cells.set(`${p.col}${p.r}`, { ref: `${p.col}${p.r}`, r: p.r, c: p.c, val, display, formula, isDate, fmt: formatCode(book.styles, s) });
       if (display !== '' || formula) { maxRow = Math.max(maxRow, p.r); maxCol = Math.max(maxCol, p.c); }
     }
   }
@@ -287,7 +294,7 @@ class SheetWriter {
         done = true;
       }
     }
-    if (!done && (type === 'money' || type === 'int')) {
+    if (!done && (type === 'money' || type === 'int' || type === 'number')) {
       const n = Number(value);
       if (isFinite(n)) {
         if (type === 'money') s = this.ensureFormat(s, id => id !== 0, 4);
@@ -356,54 +363,261 @@ async function forceRecalc(book) {
   }
 }
 
-async function writeTemplate(book, sheetPath, tpl, report) {
-  const doc = parseXml(await book.zip.file(sheetPath).async('string'));
+/* ---------- Colonnes conditionnelles (type de dépense, devise) ---------- */
+
+const SKIP = Symbol('skip');
+
+function lineColumns(tpl) {
+  const cols = Object.entries(tpl.lineCols || {}).map(([col, v]) => ({ col, ...lineColDef(v) }));
+  return {
+    cols,
+    covered: new Set(cols.flatMap(c => c.categories || [])),
+    dedicated: new Set(cols.flatMap(c => c.currencies || [])),
+  };
+}
+
+// Valeur d'une colonne pour un justificatif, ou SKIP si la colonne ne le concerne pas.
+function lineCellValue(c, item, covered, dedicated) {
+  if (c.categories?.length || c.others) {
+    const cat = item.category || 'Autre';
+    if (!(c.categories?.includes(cat) || (c.others && !covered.has(cat)))) return SKIP;
+  }
+  if (c.currencies?.length) {
+    const cur = item.currency || 'EUR';
+    if (c.currencies.includes(cur)) return lineValue(c.field, item);
+    // Devise sans colonne propre : montant converti dans la colonne en euros.
+    if (c.currencies.includes('EUR') && !dedicated.has(cur)) return lineValue(EUR_EQUIVALENT[c.field] || c.field, item);
+    return SKIP;
+  }
+  return lineValue(c.field, item);
+}
+
+function placementWarnings(tpl, report) {
+  const { cols, covered, dedicated } = lineColumns(tpl);
+  const money = cols.filter(c => fieldDef(c.field)?.type === 'money');
+  if (!money.length) return [];
+  const warnings = [];
+  for (const item of report.items) {
+    if (money.some(c => lineCellValue(c, item, covered, dedicated) !== SKIP)) continue;
+    warnings.push(`« ${item.merchant || 'Justificatif ' + item.index} » (${item.category || 'sans catégorie'}, ${item.currency || 'EUR'}) n'a pas de colonne de montant dans ce modèle.`);
+  }
+  for (const item of report.items) {
+    if (item.currency && item.currency !== 'EUR' && !item.rate) warnings.push(`Taux de change manquant pour « ${item.merchant || 'Justificatif ' + item.index} » (${item.currency}).`);
+  }
+  return warnings;
+}
+
+/* ---------- Insertion de lignes (le tableau du modèle est trop court) ---------- */
+
+const REF_RX = /(?<![\w.À-ɏ])((?:'(?:[^']|'')+'|[A-Za-z_À-ɏ][\w.À-ɏ]*)!)?(\$?)([A-Z]{1,3})(\$?)(\d+)(?::(\$?)([A-Z]{1,3})(\$?)(\d+))?(?![\w(!])/g;
+const unquoteSheet = p => p.slice(0, -1).replace(/^'(.*)'$/, '$1').replace(/''/g, "'");
+
+// Applique `fn(ligne, absolu)` à chaque référence de cellule d'une formule (hors chaînes de texte).
+function mapRefs(formula, appliesTo, fn) {
+  return formula.split(/("(?:[^"]|"")*")/).map((part, i) => (i % 2 ? part : part.replace(REF_RX,
+    (m, prefix, d1, c1, d2, r1, d3, c2, d4, r2) => {
+      if (!appliesTo(prefix)) return m;
+      let out = `${prefix || ''}${d1}${c1}${d2}${fn(+r1, !!d2)}`;
+      if (c2) out += `:${d3}${c2}${d4}${fn(+r2, !!d4)}`;
+      return out;
+    }))).join('');
+}
+
+async function insertRows(book, doc, sheet, at, n) {
+  const shift = r => (r >= at ? r + n : r);
+  const same = prefix => !prefix || unquoteSheet(prefix) === sheet.name;
+  const other = prefix => !!prefix && unquoteSheet(prefix) === sheet.name;
+  const shiftText = (text, applies = same) => mapRefs(text, applies, r => shift(r));
+  const shiftAttr = (el, attr) => { if (el.hasAttribute(attr)) el.setAttribute(attr, shiftText(el.getAttribute(attr))); };
+
+  const sheetData = all(doc, 'sheetData')[0];
+  const rows = kids(sheetData, 'row');
+  // Modèle des nouvelles lignes : la ligne du tableau juste au-dessus du point d'insertion.
+  const source = rows.find(r => +r.getAttribute('r') === at - 1) || rows.find(r => +r.getAttribute('r') === at);
+  const sourceR = source ? +source.getAttribute('r') : at;
+  const template = source ? source.cloneNode(true) : null;
+
+  for (const row of rows) {
+    const r = +row.getAttribute('r');
+    if (r < at) continue;
+    row.setAttribute('r', String(r + n));
+    row.removeAttribute('spans');
+    for (const c of kids(row, 'c')) {
+      const p = splitRef(c.getAttribute('r'));
+      if (p) c.setAttribute('r', `${p.col}${p.r + n}`);
+    }
+  }
+  for (const f of all(doc, 'f')) {
+    if (f.textContent) f.textContent = shiftText(f.textContent);
+    shiftAttr(f, 'ref');
+  }
+  for (const el of all(doc, 'mergeCell')) shiftAttr(el, 'ref');
+  for (const el of all(doc, 'hyperlink')) shiftAttr(el, 'ref');
+  for (const el of all(doc, 'autoFilter')) shiftAttr(el, 'ref');
+  for (const el of all(doc, 'selection')) { shiftAttr(el, 'sqref'); shiftAttr(el, 'activeCell'); }
+  for (const el of all(doc, 'pane')) shiftAttr(el, 'topLeftCell');
+  for (const el of [...all(doc, 'conditionalFormatting'), ...all(doc, 'dataValidation')]) {
+    shiftAttr(el, 'sqref');
+    for (const f of [...all(el, 'formula'), ...all(el, 'formula1'), ...all(el, 'formula2')]) f.textContent = shiftText(f.textContent);
+  }
+
+  // Nouvelles lignes : même hauteur, mêmes styles, mêmes formules ligne à ligne.
+  const ns = doc.documentElement.namespaceURI || NS_MAIN;
+  const before = kids(sheetData, 'row').find(r => +r.getAttribute('r') >= at + n) || null;
+  for (let i = 0; i < n; i++) {
+    const newR = at + i;
+    const row = doc.createElementNS(ns, 'row');
+    row.setAttribute('r', String(newR));
+    for (const a of ['ht', 'customHeight', 's', 'customFormat']) if (template?.hasAttribute(a)) row.setAttribute(a, template.getAttribute(a));
+    for (const src of template ? kids(template, 'c') : []) {
+      const p = splitRef(src.getAttribute('r'));
+      if (!p) continue;
+      const c = doc.createElementNS(ns, 'c');
+      c.setAttribute('r', `${p.col}${newR}`);
+      if (src.hasAttribute('s')) c.setAttribute('s', src.getAttribute('s'));
+      const f = kid(src, 'f');
+      if (f?.textContent && f.getAttribute('t') !== 'shared' && f.getAttribute('t') !== 'array') {
+        const nf = doc.createElementNS(ns, 'f');
+        nf.textContent = mapRefs(f.textContent, () => true, (r, abs) => (abs ? r : r + (newR - sourceR)));
+        c.append(nf);
+      }
+      row.append(c);
+    }
+    sheetData.insertBefore(row, before);
+  }
+
+  // Autres feuilles et noms définis qui pointent vers cette feuille.
+  for (const s of book.sheets) {
+    if (s.path === sheet.path) continue;
+    const xml = await book.zip.file(s.path).async('string');
+    if (!xml.includes('<f') || !xml.includes(sheet.name)) continue;
+    const d = parseXml(xml);
+    for (const f of all(d, 'f')) if (f.textContent) f.textContent = shiftText(f.textContent, other);
+    book.zip.file(s.path, serialize(d));
+  }
+  for (const dn of all(book.wb, 'definedName')) dn.textContent = shiftText(dn.textContent, other);
+
+  // Images et tableaux ancrés sous le point d'insertion.
+  const relsPath = sheet.path.replace(/([^/]+)$/, '_rels/$1.rels');
+  const relsFile = book.zip.file(relsPath);
+  if (relsFile) {
+    const rels = parseXml(await relsFile.async('string'));
+    for (const rel of all(rels, 'Relationship')) {
+      const type = rel.getAttribute('Type') || '';
+      const target = resolvePart(rel.getAttribute('Target') || '', sheet.path.replace(/\/[^/]+$/, ''));
+      const file = book.zip.file(target);
+      if (!file) continue;
+      if (/\/drawing$/.test(type)) {
+        const d = parseXml(await file.async('string'));
+        for (const anchor of [...all(d, 'from'), ...all(d, 'to')]) {
+          const rowEl = kid(anchor, 'row');
+          if (rowEl && +rowEl.textContent >= at - 1) rowEl.textContent = String(+rowEl.textContent + n);
+        }
+        book.zip.file(target, serialize(d));
+      } else if (/\/table$/.test(type)) {
+        const d = parseXml(await file.async('string'));
+        shiftAttr(d.documentElement, 'ref');
+        for (const el of all(d, 'autoFilter')) shiftAttr(el, 'ref');
+        book.zip.file(target, serialize(d));
+      }
+    }
+  }
+  kid(doc.documentElement, 'dimension')?.remove();
+}
+
+/* ---------- Remplissage ---------- */
+
+async function writeTemplate(book, sheet, tpl, report, capacity) {
+  const doc = parseXml(await book.zip.file(sheet.path).async('string'));
+  const shiftRef = (ref, at, n) => { const p = splitRef(ref); return p && p.r >= at ? `${p.col}${p.r + n}` : ref; };
+  let at = Infinity;
+  let extra = 0;
+  if (tpl.lineRow && isFinite(capacity) && report.items.length > capacity) {
+    // On agrandit le tableau avant sa dernière ligne : les sommes du type SUM(D9:D18) s'étendent d'elles-mêmes.
+    extra = report.items.length - capacity;
+    at = capacity >= 2 ? tpl.lineRow + capacity - 1 : tpl.lineRow + 1;
+    await insertRows(book, doc, sheet, at, extra);
+  }
   const w = new SheetWriter(doc, book.styles);
   for (const [ref, m] of Object.entries(tpl.cells || {})) {
     const def = fieldDef(m.field);
-    if (def) w.set(ref, singleValue(m.field, report, m.value), def.type);
+    if (def) w.set(shiftRef(ref, at, extra), singleValue(m.field, report, m.value, m.currency), def.type);
   }
   if (tpl.lineRow) {
-    for (const [col, field] of Object.entries(tpl.lineCols || {})) {
-      const def = fieldDef(field);
+    const { cols, covered, dedicated } = lineColumns(tpl);
+    for (const c of cols) {
+      const def = fieldDef(c.field);
       if (!def) continue;
-      const firstStyle = w.existingStyle(`${col}${tpl.lineRow}`);
-      report.items.forEach((item, i) => w.set(`${col}${tpl.lineRow + i}`, lineValue(field, item), def.type, firstStyle));
+      const firstStyle = w.existingStyle(`${c.col}${tpl.lineRow}`);
+      report.items.forEach((item, i) => {
+        const v = lineCellValue(c, item, covered, dedicated);
+        if (v !== SKIP) w.set(`${c.col}${tpl.lineRow + i}`, v, def.type, firstStyle);
+      });
     }
   }
-  book.zip.file(sheetPath, w.finish());
+  book.zip.file(sheet.path, w.finish());
   if (book.styles?.dirty) book.zip.file('xl/styles.xml', serialize(book.styles.doc));
   await forceRecalc(book);
-}
-
-function chunk(list, size) {
-  const out = [];
-  for (let i = 0; i < list.length; i += size) out.push(list.slice(i, i + size));
-  return out.length ? out : [[]];
+  return extra;
 }
 
 export async function fillTemplate(tpl, report, baseName) {
-  const first = await openWorkbook(tpl.data);
-  const sheet = first.sheets.find(s => s.name === tpl.sheet) || first.sheets[0];
-  const content = await readSheet(first, sheet.path);
+  const book = await openWorkbook(tpl.data);
+  const sheet = book.sheets.find(s => s.name === tpl.sheet) || book.sheets[0];
+  const content = await readSheet(book, sheet.path);
   const capacity = templateCapacity(tpl, content);
-  const hasLines = tpl.lineRow && Object.keys(tpl.lineCols || {}).length;
-  const parts = hasLines && report.items.length > capacity ? chunk(report.items, capacity) : [report.items];
-  const files = [];
-  for (let i = 0; i < parts.length; i++) {
-    const book = i === 0 ? first : await openWorkbook(tpl.data);
-    const part = parts.length > 1 ? { ...report, ...summarize(parts[i]) } : report;
-    await writeTemplate(book, sheet.path, tpl, part);
-    const blob = await book.zip.generateAsync({ type: 'blob', mimeType: XLSX_MIME, compression: 'DEFLATE' });
-    files.push({ name: `${baseName}${parts.length > 1 ? ` (${i + 1} sur ${parts.length})` : ''}.xlsx`, blob, mime: XLSX_MIME });
+  const warnings = placementWarnings(tpl, report);
+  const added = await writeTemplate(book, sheet, tpl, report, capacity);
+  const blob = await book.zip.generateAsync({ type: 'blob', mimeType: XLSX_MIME, compression: 'DEFLATE' });
+  return { files: [{ name: `${baseName}.xlsx`, blob, mime: XLSX_MIME }], capacity, added, warnings };
+}
+
+/* ---------- Anciens fichiers .xls ---------- */
+
+// Conversion .xls → .xlsx dans le navigateur : valeurs, formules, fusions, largeurs et formats de nombres.
+// Les couleurs et bordures ne sont pas reprises : Excel (Enregistrer sous… .xlsx) garde tout.
+export async function convertXlsToXlsx(file) {
+  await loadScript(CDN.sheetjs);
+  const XLSX = window.XLSX;
+  const wb = XLSX.read(await file.arrayBuffer(), { type: 'array', cellStyles: true, cellNF: true, cellFormula: true });
+  const out = XLSX.write(wb, { type: 'array', bookType: 'xlsx', cellStyles: true, compression: true });
+  return blobToBase64(new Blob([out], { type: XLSX_MIME }));
+}
+
+/* ---------- Description d'une feuille pour l'analyse par l'IA ---------- */
+
+export function describeSheet(content, { maxRows = 150, maxCols = 40 } = {}) {
+  const byRow = new Map();
+  for (const c of content.cells.values()) {
+    if (c.r > maxRows || c.c > maxCols || (c.display === '' && !c.formula)) continue;
+    if (!byRow.has(c.r)) byRow.set(c.r, []);
+    byRow.get(c.r).push(c);
   }
-  return { files, capacity, split: parts.length > 1 };
+  const lines = [...byRow.keys()].sort((a, b) => a - b).map(r => {
+    const cells = byRow.get(r).sort((a, b) => a.c - b.c).map(c => {
+      const value = typeof c.val === 'number' && !c.isDate ? c.val : c.display;
+      let s = `${c.ref}: ${c.formula ? '=' + c.formula : JSON.stringify(value)}`;
+      if (c.fmt) s += ` [format ${c.fmt}]`;
+      return s;
+    });
+    return `Ligne ${r} → ${cells.join(' | ')}`;
+  });
+  const merges = content.merges.map(m => `${numToCol(m.c1)}${m.r1}:${numToCol(m.c2)}${m.r2}`);
+  const widths = content.cols.filter(c => c.width && c.min <= content.maxCol + 1)
+    .map(c => `${numToCol(c.min)}${Math.min(c.max, content.maxCol + 1) > c.min ? '-' + numToCol(Math.min(c.max, content.maxCol + 1)) : ''}=${Math.round(c.width)}`);
+  return [
+    `Dernière ligne utilisée : ${content.maxRow}, dernière colonne : ${numToCol(content.maxCol)}.`,
+    merges.length ? `Cellules fusionnées : ${merges.join(', ')}.` : 'Aucune cellule fusionnée.',
+    widths.length ? `Largeurs de colonnes : ${widths.join(', ')}.` : '',
+    'Contenu (cellules non vides) :',
+    ...lines,
+  ].filter(Boolean).join('\n');
 }
 
 /* ---------- Tableau standard ---------- */
 
 const STYLES_XML = (currencySymbol) => `${XML_DECL}<styleSheet xmlns="${NS_MAIN}">
-<numFmts count="2"><numFmt numFmtId="164" formatCode="#,##0.00\\ &quot;${escXml(currencySymbol)}&quot;"/><numFmt numFmtId="165" formatCode="dd/mm/yyyy"/></numFmts>
+<numFmts count="3"><numFmt numFmtId="164" formatCode="#,##0.00\\ &quot;${escXml(currencySymbol)}&quot;"/><numFmt numFmtId="165" formatCode="dd/mm/yyyy"/><numFmt numFmtId="166" formatCode="0.0000"/></numFmts>
 <fonts count="4">
 <font><sz val="11"/><color rgb="FF1D1D1F"/><name val="Calibri"/><family val="2"/></font>
 <font><b/><sz val="11"/><color rgb="FF1D1D1F"/><name val="Calibri"/><family val="2"/></font>
@@ -417,7 +631,7 @@ const STYLES_XML = (currencySymbol) => `${XML_DECL}<styleSheet xmlns="${NS_MAIN}
 <border><left/><right/><top style="medium"><color rgb="FF1D1D1F"/></top><bottom/><diagonal/></border>
 </borders>
 <cellStyleXfs count="1"><xf numFmtId="0" fontId="0" fillId="0" borderId="0"/></cellStyleXfs>
-<cellXfs count="12">
+<cellXfs count="14">
 <xf numFmtId="0" fontId="0" fillId="0" borderId="0" xfId="0"/>
 <xf numFmtId="0" fontId="2" fillId="0" borderId="0" xfId="0" applyFont="1"/>
 <xf numFmtId="0" fontId="3" fillId="0" borderId="0" xfId="0" applyFont="1"/>
@@ -430,11 +644,13 @@ const STYLES_XML = (currencySymbol) => `${XML_DECL}<styleSheet xmlns="${NS_MAIN}
 <xf numFmtId="164" fontId="1" fillId="0" borderId="2" xfId="0" applyNumberFormat="1" applyFont="1" applyBorder="1"/>
 <xf numFmtId="0" fontId="0" fillId="0" borderId="2" xfId="0" applyBorder="1"/>
 <xf numFmtId="0" fontId="1" fillId="2" borderId="1" xfId="0" applyFont="1" applyFill="1" applyBorder="1" applyAlignment="1"><alignment horizontal="right" vertical="center"/></xf>
+<xf numFmtId="4" fontId="0" fillId="0" borderId="1" xfId="0" applyNumberFormat="1" applyBorder="1" applyAlignment="1"><alignment vertical="top"/></xf>
+<xf numFmtId="166" fontId="0" fillId="0" borderId="1" xfId="0" applyNumberFormat="1" applyBorder="1" applyAlignment="1"><alignment vertical="top"/></xf>
 </cellXfs>
 <cellStyles count="1"><cellStyle name="Normal" xfId="0" builtinId="0"/></cellStyles>
 </styleSheet>`;
 
-const S = { title: 1, info: 2, header: 3, text: 4, date: 5, money: 6, int: 7, totalLabel: 8, totalMoney: 9, totalEmpty: 10, headerRight: 11 };
+const S = { title: 1, info: 2, header: 3, text: 4, date: 5, money: 6, int: 7, totalLabel: 8, totalMoney: 9, totalEmpty: 10, headerRight: 11, moneyPlain: 12, number: 13 };
 const SYMBOLS = { EUR: '€', USD: '$', GBP: '£', CHF: 'CHF', CAD: 'CA$' };
 
 function strCell(ref, text, s) {
@@ -446,7 +662,19 @@ function numCell(ref, n, s) {
 
 export async function buildSimple(cfg, report, baseName) {
   const JSZip = await getJSZip();
-  const columns = (cfg?.columns?.length ? cfg.columns : DEFAULT_SIMPLE_COLUMNS).filter(c => fieldDef(c.field));
+  let columns = (cfg?.columns?.length ? cfg.columns : DEFAULT_SIMPLE_COLUMNS).filter(c => fieldDef(c.field));
+  // Plusieurs devises : montants d'origine sans symbole, colonnes de conversion ajoutées, totaux en euros.
+  const foreign = report.items.some(i => i.currency && i.currency !== 'EUR');
+  if (foreign) {
+    const has = f => columns.some(c => c.field === f);
+    columns = [
+      ...columns,
+      ...(has('currency') ? [] : [{ field: 'currency', label: 'Devise' }]),
+      ...(has('rate') ? [] : [{ field: 'rate', label: 'Taux €' }]),
+      ...(has('totalEur') ? [] : [{ field: 'totalEur', label: 'TVAC en €' }]),
+    ];
+  }
+  const inEuros = key => !foreign || /Eur$/.test(key);
   const defs = columns.map(c => ({ ...fieldDef(c.field), label: c.label || fieldDef(c.field).label }));
   const rows = [];
   let r = 1;
@@ -472,8 +700,9 @@ export async function buildSimple(cfg, report, baseName) {
       const v = lineValue(d.key, item);
       if (v === '' || v == null) return `<c r="${ref}" s="${d.type === 'money' ? S.money : S.text}"/>`;
       if (d.type === 'date') { const n = isoToSerial(v); return n != null ? numCell(ref, n, S.date) : strCell(ref, v, S.text); }
-      if (d.type === 'money') return numCell(ref, Number(v), S.money);
+      if (d.type === 'money') return numCell(ref, Number(v), inEuros(d.key) ? S.money : S.moneyPlain);
       if (d.type === 'int') return numCell(ref, Number(v), S.int);
+      if (d.type === 'number') return numCell(ref, Number(v), S.number);
       return strCell(ref, v, S.text);
     }));
   }
@@ -481,12 +710,12 @@ export async function buildSimple(cfg, report, baseName) {
 
   const firstMoney = defs.findIndex(d => d.type === 'money');
   if (firstMoney >= 0) {
-    const totals = { net: report.net, vat: report.vat, total: report.total };
+    const totals = { net: report.net, vat: report.vat, total: report.total, totalEur: report.totalEur };
     addRow(defs.map((d, i) => {
       const col = numToCol(i + 1);
       const ref = `${col}${r}`;
-      if (d.type === 'money') {
-        const cached = totals[d.key] ?? 0;
+      if (d.type === 'money' && inEuros(d.key)) {
+        const cached = totals[d.key] ?? Math.round(report.items.reduce((s, it) => s + (Number(it[d.key]) || 0), 0) * 100) / 100;
         return report.items.length
           ? `<c r="${ref}" s="${S.totalMoney}"><f>SUM(${col}${firstLine}:${col}${lastLine})</f><v>${cached}</v></c>`
           : numCell(ref, 0, S.totalMoney);

@@ -2,7 +2,7 @@
 // Fichiers du site : réseau d'abord (mises à jour immédiates), cache en secours.
 // Bibliothèques externes (versions figées) : cache d'abord.
 
-const VERSION = 'ndf-v1';
+const VERSION = 'ndf-v2';
 const SHELL = [
   './',
   'index.html',
@@ -22,6 +22,9 @@ const SHELL = [
   'js/sync.js',
   'js/capture.js',
   'js/transfer.js',
+  'js/pdf.js',
+  'js/fx.js',
+  'js/templateAI.js',
   'js/views/home.js',
   'js/views/expenses.js',
   'js/views/expenseSheet.js',
@@ -30,7 +33,7 @@ const SHELL = [
   'js/views/mapper.js',
   'js/views/settings.js',
 ];
-const CDN_HOSTS = ['cdn.jsdelivr.net', 'cdnjs.cloudflare.com', 'fonts.googleapis.com', 'fonts.gstatic.com'];
+const CDN_HOSTS = ['cdn.jsdelivr.net', 'cdnjs.cloudflare.com', 'cdn.sheetjs.com', 'fonts.googleapis.com', 'fonts.gstatic.com'];
 
 self.addEventListener('install', event => {
   event.waitUntil(caches.open(VERSION).then(cache => cache.addAll(SHELL)).then(() => self.skipWaiting()));

@@ -1,10 +1,11 @@
 // Clients : liste et fiche (e-mail, format Excel attendu, pièces jointes).
 
 import { state, activeClients, getClient, newClient, saveClient, deleteClient } from '../store.js';
-import { esc, icon, toast, confirmDialog, debounce, download, isCompact, blobToBase64, pickFile } from '../ui.js';
+import { esc, icon, toast, confirmDialog, debounce, download, isCompact, blobToBase64, pickFile, openSheet, spinner } from '../ui.js';
 import { CLIENT_COLORS, LINE_FIELDS, PLACEHOLDERS, DEFAULT_SIMPLE_COLUMNS, fieldDef, sampleExpenses } from '../fields.js';
-import { openWorkbook, readSheet, templateCapacity } from '../xlsx.js';
+import { openWorkbook, readSheet, templateCapacity, convertXlsToXlsx } from '../xlsx.js';
 import { makeReport, buildAttachments } from '../mail.js';
+import { analyzeTemplate, canAnalyzeTemplates } from '../templateAI.js';
 import { openMapper } from './mapper.js';
 import { initials } from './home.js';
 
@@ -139,17 +140,19 @@ function renderEditor(host, client) {
             <span class="att-icon xl">${icon('table')}</span>
             <span class="row-main"><span class="row-title">${esc(tpl.name)}</span><span class="row-sub">Feuille « ${esc(tpl.sheet)} » · ${esc(templateSummary(tpl))}</span></span>
           </div>
+          ${tpl.ai?.summary ? `<div class="row ai-summary"><span class="att-icon ai">${icon('sparkles')}</span><span class="row-sub">${esc(tpl.ai.summary)}</span></div>` : ''}
           ${!tpl.lineRow ? `<div class="row"><span class="att-icon warn">${icon('alert')}</span><span class="row-sub">Indiquez où commence le tableau des dépenses : cliquez sur une cellule de la première ligne vide et choisissez un champ « Par justificatif ».</span></div>` : ''}
           <div class="row tpl-actions">
-            <button type="button" class="btn btn-primary" data-act="map">${icon('grid')}Configurer les cellules</button>
-            <button type="button" class="btn btn-secondary" data-act="replace">Remplacer le fichier</button>
+            <button type="button" class="btn btn-primary" data-act="map">${icon('grid')}Vérifier les cellules</button>
+            ${canAnalyzeTemplates() ? `<button type="button" class="btn btn-secondary" data-act="analyze">${icon('sparkles')}Analyser avec Claude</button>` : ''}
+            <button type="button" class="btn btn-secondary" data-act="replace">Remplacer</button>
             <button type="button" class="btn btn-plain danger" data-act="remove-tpl">Retirer</button>
           </div>
         </div>` : `
         <div class="dropzone" data-dropzone data-act="upload">
           ${icon('table')}
           <strong>Déposez ici le fichier Excel du client</strong>
-          <span>ou cliquez pour le choisir (.xlsx). Vous indiquerez ensuite quelle cellule reçoit quelle information.</span>
+          <span>ou cliquez pour le choisir (.xlsx ou .xls). ${canAnalyzeTemplates() ? 'Claude l’analyse et propose où placer chaque information ; vous n’avez plus qu’à vérifier.' : 'Vous indiquerez ensuite quelle cellule reçoit quelle information (avec une clé Claude, c’est automatique).'}</span>
         </div>`) : ''}
 
       ${mode === 'simple' ? `
@@ -195,24 +198,63 @@ function renderEditor(host, client) {
 
   draw();
 
+  // Claude lit le modèle et propose le placement de chaque information.
+  async function runAnalysis(book, sheet) {
+    const tpl = c.excel.template;
+    const wait = openSheet({
+      title: 'Analyse du modèle',
+      left: '',
+      body: `<div class="analysis">${spinner()}<strong>Claude étudie le modèle…</strong><span>Structure, formules, colonnes par type de dépense et par devise. Environ 20 secondes.</span></div>`,
+    });
+    try {
+      const content = await readSheet(book, sheet.path);
+      const res = await analyzeTemplate(content, { sheetName: sheet.name, fileName: tpl.originalName || tpl.name, otherSheets: book.sheets.filter(s => s.path !== sheet.path).map(s => s.name) });
+      Object.assign(tpl, { sheet: sheet.name, lineRow: res.lineRow, lineCols: res.lineCols, cells: res.cells, capacity: null, ai: { summary: res.summary, warnings: res.warnings, at: Date.now() } });
+      if (res.fileName) c.excel.fileName = res.fileName;
+      save.flush();
+      return true;
+    } catch (err) {
+      toast(`Analyse impossible : ${err.message}`, { type: 'error', duration: 6000 });
+      return false;
+    } finally {
+      wait.close();
+    }
+  }
+
   async function loadTemplate(file) {
     if (!file) return;
-    if (!/\.xlsx$/i.test(file.name)) {
-      toast(/\.xls$/i.test(file.name) ? 'Ouvrez ce fichier .xls dans Excel et enregistrez-le au format .xlsx' : 'Choisissez un fichier Excel .xlsx', { type: 'error', duration: 5000 });
-      return;
-    }
+    const isXls = /\.xls$/i.test(file.name);
+    if (!isXls && !/\.xlsx$/i.test(file.name)) { toast('Choisissez un fichier Excel (.xlsx ou .xls)', { type: 'error' }); return; }
     if (file.size > 1_500_000) { toast('Ce modèle est trop lourd (1,5 Mo maximum).', { type: 'error' }); return; }
     try {
-      const data = await blobToBase64(file);
+      let data;
+      let name = file.name;
+      if (isXls) {
+        const ok = await confirmDialog({
+          title: 'Ancien format Excel (.xls)',
+          message: 'Il sera converti en .xlsx : formules, fusions, largeurs et formats de nombres sont conservés, mais pas les couleurs ni les bordures. Pour tout garder, ouvrez-le dans Excel, enregistrez-le en « Classeur Excel (.xlsx) » et déposez cette version.',
+          confirm: 'Convertir',
+        });
+        if (!ok) return;
+        data = await convertXlsToXlsx(file);
+        name = file.name.replace(/\.xls$/i, '.xlsx');
+      } else {
+        data = await blobToBase64(file);
+      }
       const book = await openWorkbook(data);
       const visible = book.sheets.find(s => !s.hidden) || book.sheets[0];
       const prev = c.excel.template;
-      c.excel.template = { name: file.name, data, sheet: visible.name, cells: prev?.cells || {}, lineRow: prev?.lineRow || null, lineCols: prev?.lineCols || {}, capacity: null };
-      if (!c.excel.fileName || c.excel.fileName === 'Note de frais {nom} {periode}') c.excel.fileName = file.name.replace(/\.xlsx$/i, '') + ' {periode}';
+      const keep = !canAnalyzeTemplates() && prev;
+      c.excel.template = { name, originalName: file.name, data, sheet: visible.name, cells: keep ? prev.cells : {}, lineRow: keep ? prev.lineRow : null, lineCols: keep ? prev.lineCols : {}, capacity: null };
+      c.excel.mode = 'template';
+      if (!c.excel.fileName || c.excel.fileName === 'Note de frais {nom} {periode}') c.excel.fileName = file.name.replace(/\.xlsx?$/i, '') + ' {periode}';
       save.flush();
+      draw();
+      if (canAnalyzeTemplates()) await runAnalysis(book, visible);
       draw();
       openMapper(c, () => { save.flush(); draw(); });
     } catch (err) {
+      console.error(err);
       toast(err.message, { type: 'error', duration: 5000 });
     }
   }
@@ -263,8 +305,18 @@ function renderEditor(host, client) {
     if (t.dataset.colDel != null) { cols.splice(+t.dataset.colDel, 1); save.flush(); draw(); return; }
 
     const act = t.dataset.act;
-    if (act === 'upload' || act === 'replace') return loadTemplate(await pickFile('.xlsx,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'));
+    if (act === 'upload' || act === 'replace') return loadTemplate(await pickFile('.xlsx,.xls,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,application/vnd.ms-excel'));
     if (act === 'map') return openMapper(c, () => { save.flush(); draw(); });
+    if (act === 'analyze') {
+      try {
+        const book = await openWorkbook(c.excel.template.data);
+        const sheet = book.sheets.find(s => s.name === c.excel.template.sheet) || book.sheets[0];
+        if (await runAnalysis(book, sheet)) { draw(); openMapper(c, () => { save.flush(); draw(); }); }
+      } catch (err) {
+        toast(err.message, { type: 'error' });
+      }
+      return;
+    }
     if (act === 'remove-tpl') {
       if (await confirmDialog({ title: 'Retirer le modèle ?', message: 'La configuration des cellules sera perdue.', confirm: 'Retirer', destructive: true })) {
         c.excel.template = null;

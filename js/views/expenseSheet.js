@@ -1,13 +1,17 @@
-// Fiche d'un justificatif : aperçu, proposition de l'IA, correction, choix du destinataire.
+// Fiche d'un justificatif : aperçu, proposition de l'IA, correction, ajout à la note d'un client.
 
-import { state, getExpense, saveExpense, deleteExpense, activeClients, getClient, onChange, saveSettings } from '../store.js';
-import { esc, icon, openSheet, confirmDialog, toast, numStr, fmtDate, spinner } from '../ui.js';
-import { CATEGORIES, DOC_TYPES, PAYMENTS, CURRENCIES, CLIENT_COLORS, num, amounts } from '../fields.js';
+import { state, getExpense, saveExpense, deleteExpense, activeClients, getClient, onChange, saveSettings, pendingExpenses } from '../store.js';
+import { esc, icon, openSheet, confirmDialog, toast, numStr, fmtDate, spinner, money, isTouch } from '../ui.js';
+import { CATEGORIES, DOC_TYPES, PAYMENTS, CURRENCIES, CLIENT_COLORS, num, amounts, round2 } from '../fields.js';
 import { analyzeExpense } from '../ai.js';
+import { rateToEur } from '../fx.js';
+import { pdfThumb } from '../pdf.js';
+import { openCamera, openFilePicker } from '../capture.js';
 import { openSendSheet } from './sendSheet.js';
 
 const TEXT_FIELDS = ['merchant', 'description', 'date', 'category', 'docType', 'vatRate', 'invoiceNo', 'payment', 'currency', 'notes'];
 const MONEY_FIELDS = ['total', 'net', 'vat'];
+const rateStr = r => (r == null || !isFinite(r) ? '' : String(Math.round(r * 1e6) / 1e6).replace('.', ','));
 
 const options = (list, value, placeholder = 'Choisir…') =>
   `<option value="">${placeholder}</option>` + list.map(v => `<option ${v === value ? 'selected' : ''}>${esc(v)}</option>`).join('');
@@ -22,7 +26,7 @@ function aiStatusHtml(exp) {
   }
   if (exp.aiStatus === 'done' && exp.ai) {
     const local = exp.ai.engine === 'local';
-    const warn = exp.ai.isReceipt === false ? "Ce document ne ressemble pas à un justificatif. " : '';
+    const warn = exp.ai.isReceipt === false ? 'Ce document ne ressemble pas à un justificatif. ' : '';
     const remark = warn + (exp.ai.remark || '');
     const conf = { haute: 'confiance élevée', moyenne: 'confiance moyenne', faible: 'à vérifier' }[exp.ai.confidence] || '';
     return `<div class="ai-status done ${local || exp.ai.confidence === 'faible' || warn ? 'warn' : ''}">
@@ -40,8 +44,10 @@ export function openExpenseSheet(id, { isNew = false } = {}) {
   if (!exp) return;
   const touched = new Set();
   let removed = false;
+  const isPdf = exp.mime === 'application/pdf';
+  const isImage = exp.mime?.startsWith('image/') && !!exp.thumb;
+  const previewUrl = isImage && exp.file ? URL.createObjectURL(exp.file) : '';
 
-  const previewUrl = exp.thumb && exp.file ? URL.createObjectURL(exp.file) : '';
   const sheet = openSheet({
     title: isNew ? 'Nouveau justificatif' : 'Justificatif',
     left: `<button type="button" class="btn-text" data-sheet-close>${isNew ? 'Plus tard' : 'Fermer'}</button>`,
@@ -53,19 +59,38 @@ export function openExpenseSheet(id, { isNew = false } = {}) {
   });
 
   const preview = exp.thumb
-    ? `<img src="${previewUrl || exp.thumb}" alt="Aperçu du justificatif">`
-    : `<div class="doc-tile">${icon(exp.mime === 'application/pdf' ? 'doc' : 'image')}<span>${esc(exp.fileName || 'Document')}</span></div>`;
+    ? `<img src="${previewUrl || exp.thumb}" alt="Aperçu du justificatif" data-preview-img>${isPdf ? `<span class="pdf-badge">PDF${exp.pages > 1 ? ` · ${exp.pages} pages` : ''}</span>` : ''}`
+    : `<div class="doc-tile">${icon(isPdf ? 'doc' : 'image')}<span>${esc(exp.fileName || 'Document')}</span></div>`;
 
-  const clientChips = () => {
-    const clients = activeClients();
-    return clients.map(c => `
+  const clientChips = () => activeClients().map(c => `
       <button type="button" class="chip ${exp.clientId === c.id ? 'on' : ''}" data-client="${c.id}">
         <span class="dot" style="background:${CLIENT_COLORS[c.color] || CLIENT_COLORS.blue}"></span>${esc(c.name || 'Sans nom')}
       </button>`).join('') + `<a class="chip ghost" href="#/clients" data-sheet-close>${icon('plus')}Nouveau client</a>`;
-  };
 
   const sent = exp.status === 'sent';
   const sentTo = getClient(exp.sentTo);
+
+  // Boutons : on remplit la note en cours d'un client, puis on l'envoie en une fois.
+  const actionsHtml = () => {
+    if (sent) {
+      return `<button type="button" class="btn btn-primary btn-lg" data-act="send">${icon('send')}Renvoyer</button>
+        <button type="button" class="btn btn-secondary btn-lg" data-act="later">Fermer</button>`;
+    }
+    const c = getClient(exp.clientId);
+    if (!c) {
+      return `<button type="button" class="btn btn-primary btn-lg" data-act="later">${icon('check')}Enregistrer</button>
+        <p class="method-hint">Choisissez un client pour ajouter ce justificatif à sa note de frais.</p>`;
+    }
+    const n = pendingExpenses().filter(e => e.clientId === c.id && e.id !== exp.id).length + 1;
+    return `
+      <button type="button" class="btn btn-primary btn-lg" data-act="add">${icon('plus')}Ajouter à la note · ${esc(c.name || 'client')}</button>
+      <div class="btn-pair">
+        <button type="button" class="btn btn-secondary btn-lg" data-act="next">${icon(isTouch() ? 'camera' : 'upload')}Ticket suivant</button>
+        <button type="button" class="btn btn-secondary btn-lg" data-act="send">${icon('send')}Envoyer${n > 1 ? ` les ${n}` : ''}</button>
+      </div>
+      <p class="method-hint">${n > 1 ? `La note de ${esc(c.name)} contiendra ${n} justificatifs, dans un seul fichier Excel.` : 'Ajoutez d’autres tickets à cette note : ils partiront ensemble, dans un seul fichier Excel.'}</p>`;
+  };
+
   sheet.body.innerHTML = `
     <button type="button" class="exp-preview" data-act="view" aria-label="Agrandir">${preview}<span class="zoom">${icon('eye')}</span></button>
     <div data-ai>${aiStatusHtml(exp)}</div>
@@ -73,15 +98,17 @@ export function openExpenseSheet(id, { isNew = false } = {}) {
 
     <div class="amount-hero">
       <input class="amount-input" data-f="total" inputmode="decimal" autocomplete="off" placeholder="0,00" value="${esc(numStr(num(exp.data.total)))}" aria-label="Montant TVAC">
-      <span class="cur" data-cur>${esc(exp.data.currency === 'EUR' || !exp.data.currency ? '€' : exp.data.currency)}</span>
+      <span class="cur" data-cur></span>
     </div>
-    <p class="amount-label">Montant payé, TVA comprise</p>
+    <p class="amount-label" data-eur>Montant payé, TVA comprise</p>
 
     <div class="list form">
       <label class="field"><span>Date</span><input type="date" data-f="date" value="${esc(exp.data.date)}"></label>
       <label class="field"><span>Commerçant</span><input data-f="merchant" autocomplete="off" placeholder="Ex. Delhaize" value="${esc(exp.data.merchant)}"></label>
       <label class="field"><span>Description</span><input data-f="description" autocomplete="off" placeholder="Ex. Déjeuner client" value="${esc(exp.data.description)}"></label>
       <label class="field"><span>Catégorie</span><select data-f="category">${options(CATEGORIES, exp.data.category)}</select></label>
+      <label class="field"><span>Devise</span><select data-f="currency">${CURRENCIES.map(c => `<option ${c === (exp.data.currency || 'EUR') ? 'selected' : ''}>${c}</option>`).join('')}</select></label>
+      <label class="field" data-rate-row><span>Taux de change</span><input data-f="rate" inputmode="decimal" autocomplete="off" placeholder="Taux BCE" value="${esc(rateStr(num(exp.data.rate)))}"></label>
     </div>
 
     <details class="more">
@@ -93,18 +120,14 @@ export function openExpenseSheet(id, { isNew = false } = {}) {
         <label class="field"><span>Type</span><select data-f="docType">${options(DOC_TYPES, exp.data.docType)}</select></label>
         <label class="field"><span>N° de facture</span><input data-f="invoiceNo" autocomplete="off" value="${esc(exp.data.invoiceNo)}"></label>
         <label class="field"><span>Paiement</span><select data-f="payment">${options(PAYMENTS, exp.data.payment)}</select></label>
-        <label class="field"><span>Devise</span><select data-f="currency">${CURRENCIES.map(c => `<option ${c === (exp.data.currency || 'EUR') ? 'selected' : ''}>${c}</option>`).join('')}</select></label>
         <label class="field stack"><span>Remarque</span><textarea data-f="notes" rows="2" placeholder="Ex. invités : M. Dupont, Mme Martin">${esc(exp.data.notes)}</textarea></label>
       </div>
     </details>
 
-    <h3 class="group-label">Envoyer à</h3>
+    <h3 class="group-label">Note de frais de</h3>
     <div class="chips" data-chips>${clientChips()}</div>
 
-    <div class="sheet-actions">
-      <button type="button" class="btn btn-primary btn-lg" data-act="send">${icon('send')}${sent ? 'Renvoyer' : 'Envoyer maintenant'}</button>
-      <button type="button" class="btn btn-secondary btn-lg" data-act="later">${sent ? 'Fermer' : 'Garder pour plus tard'}</button>
-    </div>
+    <div class="sheet-actions" data-actions>${actionsHtml()}</div>
     <button type="button" class="btn btn-plain danger delete-btn" data-act="delete">${icon('trash')}Supprimer ce justificatif</button>
   `;
 
@@ -114,11 +137,50 @@ export function openExpenseSheet(id, { isNew = false } = {}) {
     const el = input('total');
     el.style.width = `${Math.max(4, (el.value || el.placeholder).length + 0.5)}ch`;
   };
+
+  // Devise étrangère : taux de change BCE du jour de la dépense et montant converti.
+  const updateCurrency = () => {
+    const cur = input('currency').value || 'EUR';
+    body.querySelector('[data-cur]').textContent = cur === 'EUR' ? '€' : cur;
+    body.querySelector('[data-rate-row]').hidden = cur === 'EUR';
+    const label = body.querySelector('[data-eur]');
+    const total = num(input('total').value);
+    const rate = num(input('rate').value);
+    if (cur === 'EUR') label.textContent = 'Montant payé, TVA comprise';
+    else if (total != null && rate) label.innerHTML = `Soit <strong>${money(round2(total * rate))}</strong> · 1 ${esc(cur)} = ${esc(rateStr(rate))} €`;
+    else label.textContent = `Montant payé en ${cur}, TVA comprise`;
+  };
+  let rateRequest = 0;
+  const refreshRate = async () => {
+    const cur = input('currency').value || 'EUR';
+    if (cur === 'EUR' || touched.has('rate')) return updateCurrency();
+    const req = ++rateRequest;
+    input('rate').placeholder = 'Recherche du taux…';
+    try {
+      const rate = await rateToEur(cur, input('date').value);
+      if (req === rateRequest && !touched.has('rate')) input('rate').value = rateStr(rate);
+    } catch {
+      input('rate').placeholder = 'Taux introuvable : saisissez-le';
+    }
+    updateCurrency();
+  };
+
   fitAmount();
+  updateCurrency();
+  if ((exp.data.currency || 'EUR') !== 'EUR' && !exp.data.rate) refreshRate();
+
+  // PDF : la vignette est petite, on affiche une version plus nette de la 1re page.
+  if (isPdf && exp.thumb) {
+    pdfThumb(exp.file, 1000).then(({ thumb }) => {
+      const img = body.querySelector('[data-preview-img]');
+      if (img) img.src = thumb;
+    }).catch(() => {});
+  }
 
   function readForm() {
     for (const f of TEXT_FIELDS) exp.data[f] = input(f).value.trim();
     for (const f of MONEY_FIELDS) exp.data[f] = num(input(f).value);
+    exp.data.rate = exp.data.currency === 'EUR' ? null : num(input('rate').value);
   }
 
   async function persist(silent = false) {
@@ -134,42 +196,54 @@ export function openExpenseSheet(id, { isNew = false } = {}) {
   // Quand l'IA a fini, on remplit les champs que l'utilisateur n'a pas modifiés.
   let lastStatus = exp.aiStatus;
   const unsubscribe = onChange((what, detail) => {
-    if (what !== 'expenses' || detail.id !== id || removed) return;
+    if (what !== 'expenses' || removed) return;
+    if (detail.id !== id) { body.querySelector('[data-actions]').innerHTML = actionsHtml(); return; }
     const fresh = getExpense(id);
     if (!fresh) return;
     const prev = lastStatus;
     lastStatus = fresh.aiStatus;
     body.querySelector('[data-ai]').innerHTML = aiStatusHtml(fresh);
     if (prev === 'pending' && fresh.aiStatus === 'done') {
-      for (const f of [...TEXT_FIELDS, ...MONEY_FIELDS]) {
+      for (const f of [...TEXT_FIELDS, ...MONEY_FIELDS, 'rate']) {
         if (touched.has(f)) continue;
         const v = fresh.data[f];
         const el = input(f);
-        el.value = MONEY_FIELDS.includes(f) ? numStr(num(v)) : (v ?? '');
+        el.value = f === 'rate' ? rateStr(num(v)) : MONEY_FIELDS.includes(f) ? numStr(num(v)) : (v ?? '');
         el.classList.add('filled');
         setTimeout(() => el.classList.remove('filled'), 1200);
       }
       fitAmount();
-      updateCurrency();
+      refreshRate();
       const derived = amounts(fresh.data);
       if (derived.vat != null && !input('vat').value) input('vat').placeholder = numStr(derived.vat);
       if (derived.net != null && !input('net').value) input('net').placeholder = numStr(derived.net);
     }
   });
 
-  const updateCurrency = () => {
-    const c = input('currency').value;
-    body.querySelector('[data-cur]').textContent = c === 'EUR' ? '€' : c;
-  };
-
   body.oninput = e => {
     const f = e.target.dataset?.f;
     if (!f) return;
     touched.add(f);
     if (f === 'total') fitAmount();
-    if (f === 'currency') updateCurrency();
+    if (f === 'total' || f === 'rate') updateCurrency();
   };
-  body.onchange = body.oninput;
+  body.onchange = e => {
+    const f = e.target.dataset?.f;
+    if (!f) return;
+    touched.add(f);
+    if (f === 'currency') { touched.delete('rate'); input('rate').value = ''; refreshRate(); }
+    if (f === 'date' && !touched.has('rate')) refreshRate();
+  };
+
+  const notifyAdded = c => {
+    const items = pendingExpenses().filter(e => e.clientId === c.id);
+    const total = items.reduce((s, e) => s + (amounts(e.data).total || 0) * (e.data.currency && e.data.currency !== 'EUR' ? (num(e.data.rate) || 0) : 1), 0);
+    toast(`Note ${c.name} : ${items.length} justificatif${items.length > 1 ? 's' : ''} · ${money(total)}`, {
+      type: 'success',
+      duration: 5000,
+      action: { label: 'Envoyer', onClick: () => openSendSheet({ clientId: c.id }) },
+    });
+  };
 
   body.onclick = async e => {
     const chip = e.target.closest('[data-client]');
@@ -177,6 +251,7 @@ export function openExpenseSheet(id, { isNew = false } = {}) {
       exp.clientId = exp.clientId === chip.dataset.client ? '' : chip.dataset.client;
       if (exp.clientId) saveSettings({ lastClientId: exp.clientId });
       body.querySelector('[data-chips]').innerHTML = clientChips();
+      body.querySelector('[data-actions]').innerHTML = actionsHtml();
       return;
     }
     const act = e.target.closest('[data-act]')?.dataset.act;
@@ -189,7 +264,22 @@ export function openExpenseSheet(id, { isNew = false } = {}) {
       analyzeExpense(id, { overwrite: true });
       return;
     }
-    if (act === 'later') { await persist(true); sheet.close(); if (!sent) toast('Gardé pour plus tard', { type: 'success' }); return; }
+    if (act === 'later') { await persist(true); sheet.close(); if (!sent) toast('Enregistré', { type: 'success' }); return; }
+    if (act === 'add') {
+      const c = getClient(exp.clientId);
+      await persist(true);
+      sheet.close();
+      if (c) notifyAdded(c);
+      return;
+    }
+    if (act === 'next') {
+      // Le sélecteur doit s'ouvrir directement dans le geste (exigence d'iOS) : on enregistre ensuite.
+      const clientId = exp.clientId;
+      if (isTouch()) openCamera({ clientId }); else openFilePicker({ clientId });
+      persist(true);
+      sheet.close();
+      return;
+    }
     if (act === 'unsend') {
       exp.status = 'pending';
       exp.sentAt = null;
@@ -209,7 +299,7 @@ export function openExpenseSheet(id, { isNew = false } = {}) {
     }
     if (act === 'send') {
       if (!exp.clientId) {
-        toast('Choisissez d’abord à qui l’envoyer');
+        toast('Choisissez d’abord le client');
         const chips = body.querySelector('[data-chips]');
         chips.classList.remove('shake');
         void chips.offsetWidth;

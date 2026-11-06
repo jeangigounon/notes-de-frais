@@ -1,7 +1,7 @@
 // Configuration d'un modèle Excel : on clique sur une cellule et on choisit ce qu'elle doit contenir.
 
 import { esc, icon, openSheet, toast, promptDialog, confirmDialog, spinner } from '../ui.js';
-import { LINE_FIELDS, SINGLE_FIELDS, fieldDef } from '../fields.js';
+import { LINE_FIELDS, SINGLE_FIELDS, CATEGORIES, CURRENCIES, fieldDef, lineColDef, lineColLabel } from '../fields.js';
 import { openWorkbook, readSheet, templateCapacity, splitRef, numToCol } from '../xlsx.js';
 
 const MIN_ROWS = 30;
@@ -9,7 +9,62 @@ const MIN_COLS = 8;
 
 function fieldLabel(m) {
   if (m.field === 'fixed') return `« ${m.value} »`;
+  if (m.field === 'fxRate') return `Taux ${m.currency} → €`;
   return fieldDef(m.field)?.label || m.field;
+}
+
+// Conditions d'une colonne : seulement certaines catégories et/ou une devise.
+function editConditions(col, def) {
+  return new Promise(resolve => {
+    const d = lineColDef(def);
+    const picked = new Set(d.categories || []);
+    let others = !!d.others;
+    let currency = d.currencies?.[0] || '';
+    let result = null;
+    const sheet = openSheet({
+      title: `Colonne ${col} · ${fieldDef(d.field)?.label || d.field}`,
+      left: '<button type="button" class="btn-text" data-sheet-close>Annuler</button>',
+      right: '<button type="button" class="btn-text strong" data-ok>OK</button>',
+      onClose: () => resolve(result),
+    });
+    const draw = () => {
+      sheet.body.innerHTML = `
+        <p class="group-foot" style="margin-top:4px">Utile quand le modèle a une colonne par type de dépense ou par devise : la valeur n'est écrite que pour les justificatifs concernés.</p>
+        <h3 class="group-label">Catégories</h3>
+        <div class="chips">
+          <button type="button" class="chip ${!picked.size && !others ? 'on' : ''}" data-all>Toutes</button>
+          ${CATEGORIES.map(c => `<button type="button" class="chip ${picked.has(c) ? 'on' : ''}" data-cat="${esc(c)}">${esc(c)}</button>`).join('')}
+        </div>
+        <div class="list form" style="margin-top:12px">
+          <label class="field"><span>Et toutes les catégories sans colonne propre (« divers »)</span><span class="switch"><input type="checkbox" data-others ${others ? 'checked' : ''}><span></span></span></label>
+        </div>
+        <h3 class="group-label">Devise</h3>
+        <div class="list form">
+          <label class="field"><span>Seulement</span><select data-cur>
+            <option value="">Toutes les devises</option>
+            ${CURRENCIES.map(x => `<option ${x === currency ? 'selected' : ''}>${x}</option>`).join('')}
+          </select></label>
+        </div>
+        <p class="group-foot">Une colonne en EUR reçoit aussi, convertis en euros, les montants des devises qui n'ont pas de colonne propre dans le modèle.</p>`;
+    };
+    draw();
+    sheet.body.onclick = e => {
+      const cat = e.target.closest('[data-cat]')?.dataset.cat;
+      if (cat) { if (picked.has(cat)) picked.delete(cat); else picked.add(cat); draw(); return; }
+      if (e.target.closest('[data-all]')) { picked.clear(); others = false; draw(); }
+    };
+    sheet.body.onchange = e => {
+      if (e.target.matches('[data-others]')) { others = e.target.checked; draw(); }
+      if (e.target.matches('[data-cur]')) currency = e.target.value;
+    };
+    sheet.el.querySelector('[data-ok]').onclick = () => {
+      result = { field: d.field };
+      if (picked.size) result.categories = [...picked];
+      if (others) result.others = true;
+      if (currency) result.currencies = [currency];
+      sheet.close();
+    };
+  });
 }
 
 export async function openMapper(client, onDone) {
@@ -79,7 +134,8 @@ export async function openMapper(client, onDone) {
     }
     const ghostRows = work.lineRow ? Math.min(isFinite(cap) ? cap : 4, 4) : 0;
 
-    let html = `<table class="xl"><colgroup><col style="width:42px">${widths.slice(1).map(w => `<col style="width:${w}px">`).join('')}</colgroup>`;
+    const tableWidth = 42 + widths.slice(1).reduce((s, w) => s + w, 0);
+    let html = `<table class="xl" style="width:${tableWidth}px"><colgroup><col style="width:42px">${widths.slice(1).map(w => `<col style="width:${w}px">`).join('')}</colgroup>`;
     html += `<thead><tr><th class="corner"></th>${Array.from({ length: cols }, (_, i) => `<th>${numToCol(i + 1)}</th>`).join('')}</tr></thead><tbody>`;
     for (let r = 1; r <= rows; r++) {
       html += `<tr><th class="rh ${r === work.lineRow ? 'line' : ''}">${r}</th>`;
@@ -96,7 +152,7 @@ export async function openMapper(client, onDone) {
         let cls = '';
         let inner = '';
         if (single) { cls = 'm-single'; inner = `<span class="tag ${single.field === 'fixed' ? 'fixed' : ''}">${esc(fieldLabel(single))}</span>`; }
-        else if (lineField) { cls = 'm-line'; inner = `<span class="tag line">↓ ${esc(fieldDef(lineField)?.label || lineField)}</span>`; }
+        else if (lineField) { cls = 'm-line'; inner = `<span class="tag line" title="${esc(lineColLabel(lineField))}">↓ ${esc(lineColLabel(lineField, { short: true }))}</span>`; }
         else if (ghost) { cls = 'm-ghost'; inner = '⋮'; }
         else if (cell) {
           if (cell.formula && !cell.display) { cls = 'formula'; inner = 'ƒx'; }
@@ -119,13 +175,19 @@ export async function openMapper(client, onDone) {
     return `
       <h3 class="group-label">Par justificatif${work.lineRow ? ` · ligne ${work.lineRow}` : ''}</h3>
       <div class="list">
-        ${lines.length ? lines.map(([col, f]) => `
-          <div class="row compact"><span class="tag line">Col. ${col}</span><span class="row-main"><span class="row-title">${esc(fieldDef(f)?.label || f)}</span></span><button type="button" class="btn-icon" data-unline="${col}" aria-label="Retirer">${icon('x')}</button></div>`).join('')
+        ${lines.length ? lines.map(([col, f]) => {
+          const d = lineColDef(f);
+          const cond = [d.categories?.length ? d.categories.join(', ') : '', d.others ? '+ autres catégories' : '', d.currencies?.length ? `devise ${d.currencies.join(', ')}` : ''].filter(Boolean).join(' · ');
+          return `
+          <div class="row compact"><span class="tag line">Col. ${col}</span><span class="row-main"><span class="row-title">${esc(fieldDef(d.field)?.label || d.field)}</span>${cond ? `<span class="row-sub">${esc(cond)}</span>` : ''}</span>
+            <button type="button" class="btn-icon" data-cond="${col}" aria-label="Conditions" title="Seulement certaines catégories ou devises">${icon('sliders')}</button>
+            <button type="button" class="btn-icon" data-unline="${col}" aria-label="Retirer">${icon('x')}</button></div>`;
+        }).join('')
         : '<div class="row compact"><span class="row-sub">Cliquez sur la première ligne vide du tableau des dépenses, colonne par colonne.</span></div>'}
         ${lines.length ? `
           <label class="field"><span>Lignes disponibles</span><input type="number" min="1" max="500" data-capacity placeholder="${isFinite(auto) ? auto : 'illimité'}" value="${work.capacity || ''}"></label>` : ''}
       </div>
-      ${lines.length ? `<p class="group-foot">${isFinite(auto) ? `${auto} ligne${auto > 1 ? 's' : ''} avant la ligne de total (détection automatique). Au-delà, la note est répartie sur plusieurs fichiers.` : 'Aucune ligne de total détectée sous le tableau : toutes les dépenses tiennent sur une seule feuille.'}</p>` : ''}
+      ${lines.length ? `<p class="group-foot">${isFinite(auto) ? `${auto} ligne${auto > 1 ? 's' : ''} avant la ligne de total (détection automatique). S'il y a plus de justificatifs, des lignes sont ajoutées au tableau et les totaux suivent : tout reste dans un seul fichier.` : 'Aucune ligne de total détectée sous le tableau : toutes les dépenses tiennent sur une seule feuille.'}</p>` : ''}
 
       <h3 class="group-label">Une seule fois</h3>
       <div class="list">
@@ -138,7 +200,14 @@ export async function openMapper(client, onDone) {
   function draw() {
     const scroll = sheet.body.querySelector('.grid-wrap');
     const pos = scroll ? [scroll.scrollLeft, scroll.scrollTop] : [0, 0];
+    const ai = tpl.ai;
     sheet.body.innerHTML = `
+      ${ai?.summary ? `
+        <div class="ai-box">
+          <div class="ai-box-head">${icon('sparkles')}<strong>Analyse de Claude</strong><span>vérifiez puis touchez « Terminé »</span></div>
+          <p>${esc(ai.summary)}</p>
+          ${ai.warnings?.length ? `<ul>${ai.warnings.map(w => `<li>${esc(w)}</li>`).join('')}</ul>` : ''}
+        </div>` : ''}
       <div class="mapper">
         <div class="mapper-main">
           <div class="mapper-bar">
@@ -159,7 +228,8 @@ export async function openMapper(client, onDone) {
     const p = splitRef(ref);
     if (work.lineRow && work.lineRow !== p.r && Object.keys(work.lineCols).length) toast(`Tableau des dépenses déplacé à la ligne ${p.r}`);
     work.lineRow = p.r;
-    work.lineCols[p.col] = field;
+    const prev = work.lineCols[p.col];
+    work.lineCols[p.col] = prev ? { ...lineColDef(prev), field } : { field };
     for (const r of Object.keys(work.cells)) {
       const q = splitRef(r);
       if (q.r === p.r && work.lineCols[q.col]) delete work.cells[r];
@@ -175,7 +245,7 @@ export async function openMapper(client, onDone) {
 
   function assignSingle(ref, field, value) {
     clearRef(ref);
-    work.cells[ref] = field === 'fixed' ? { field, value } : { field };
+    work.cells[ref] = field === 'fixed' ? { field, value } : field === 'fxRate' ? { field, currency: value } : { field };
   }
 
   function openPopover(td) {
@@ -184,7 +254,7 @@ export async function openMapper(client, onDone) {
     const p = splitRef(ref);
     const cell = content.cells.get(ref);
     const curSingle = work.cells[ref];
-    const curLine = p.r === work.lineRow ? work.lineCols[p.col] : null;
+    const curLine = p.r === work.lineRow && work.lineCols[p.col] ? lineColDef(work.lineCols[p.col]).field : null;
     td.classList.add('sel');
     const groups = [...new Set(SINGLE_FIELDS.map(f => f.group))];
     popover = document.createElement('div');
@@ -197,6 +267,7 @@ export async function openMapper(client, onDone) {
         <div class="pop-group">Une seule fois · ${esc(g)}</div>
         ${SINGLE_FIELDS.filter(f => f.group === g).map(f => `<button type="button" class="pop-item ${curSingle?.field === f.key ? 'cur' : ''}" data-single="${f.key}"><i class="dot"></i>${esc(f.label)}${curSingle?.field === f.key ? icon('check') : ''}</button>`).join('')}`).join('')}
       <div class="pop-group">Autre</div>
+      <button type="button" class="pop-item ${curSingle?.field === 'fxRate' ? 'cur' : ''}" data-fx><i class="dot"></i>Taux de change d'une devise…</button>
       <button type="button" class="pop-item ${curSingle?.field === 'fixed' ? 'cur' : ''}" data-fixed><i class="dot fixed"></i>Texte fixe…</button>
       ${curSingle || curLine ? `<button type="button" class="pop-item danger" data-clear>${icon('x')}Vider cette cellule</button>` : ''}`;
     document.body.append(popover);
@@ -228,6 +299,12 @@ export async function openMapper(client, onDone) {
         const value = await promptDialog({ title: `Texte fixe en ${ref}`, message: 'Ex. un code projet ou un centre de coût, toujours identique.', value: curSingle?.value || '' });
         if (value == null || !value.trim()) return;
         assignSingle(ref, 'fixed', value.trim());
+      } else if (b.hasAttribute('data-fx')) {
+        closePopover();
+        const cur = await promptDialog({ title: `Taux de change en ${ref}`, message: 'Code de la devise (ex. CHF, GBP, USD). La cellule recevra la valeur en euros d’une unité de cette devise (taux BCE).', value: curSingle?.currency || '', placeholder: 'CHF' });
+        const code = String(cur || '').trim().toUpperCase();
+        if (!/^[A-Z]{3}$/.test(code)) return;
+        assignSingle(ref, 'fxRate', code);
       } else if (b.hasAttribute('data-clear')) clearRef(ref);
       closePopover();
       draw();
@@ -239,6 +316,12 @@ export async function openMapper(client, onDone) {
   sheet.body.onclick = e => {
     const td = e.target.closest('td[data-ref]');
     if (td) return openPopover(td);
+    const cond = e.target.closest('[data-cond]');
+    if (cond) {
+      const col = cond.dataset.cond;
+      editConditions(col, work.lineCols[col]).then(res => { if (res) { work.lineCols[col] = res; draw(); } });
+      return;
+    }
     const unline = e.target.closest('[data-unline]');
     if (unline) { delete work.lineCols[unline.dataset.unline]; if (!Object.keys(work.lineCols).length) work.lineRow = null; draw(); return; }
     const unset = e.target.closest('[data-unset]');

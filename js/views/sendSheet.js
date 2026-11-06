@@ -5,7 +5,7 @@ import { esc, icon, openSheet, actionSheet, confirmDialog, toast, money, fmtDate
 import { CLIENT_COLORS } from '../fields.js';
 import {
   makeReport, composeMessage, buildAttachments, preferredMethod, sendViaGraph, msSignIn, shareFiles,
-  canShareFiles, buildEml, buildZip, splitEmails, isEmail,
+  canShareFiles, buildEml, buildZip, splitEmails, isEmail, ensureRates,
 } from '../mail.js';
 import { thumb } from './expenses.js';
 
@@ -39,7 +39,7 @@ export async function openSendSheet({ clientId, focusId = null, includeSent = fa
   let busy = false;
 
   const sheet = openSheet({
-    title: `Envoyer à ${client.name || 'ce client'}`,
+    title: `Note de frais · ${client.name || 'client'}`,
     left: '<button type="button" class="btn-text" data-sheet-close>Annuler</button>',
   });
   const body = sheet.body;
@@ -64,7 +64,7 @@ export async function openSendSheet({ clientId, focusId = null, includeSent = fa
     body.innerHTML = `
       <div class="send-head">
         <span class="avatar lg" style="background:${CLIENT_COLORS[client.color] || CLIENT_COLORS.blue}">${esc((client.name || '?').slice(0, 1).toUpperCase())}</span>
-        <div><div class="big-amount">${money(rep.total, rep.currency)}</div><div class="row-sub">${rep.count} justificatif${rep.count > 1 ? 's' : ''} · ${esc(rep.period)}</div></div>
+        <div><div class="big-amount">${money(rep.displayTotal, rep.displayCurrency)}</div><div class="row-sub">${rep.count} justificatif${rep.count > 1 ? 's' : ''} · ${esc(rep.period)}${rep.displayCurrency === 'EUR' && rep.items.some(i => i.currency !== 'EUR') ? ' · converti en euros' : ''}</div></div>
       </div>
 
       <div class="list form">
@@ -104,7 +104,7 @@ export async function openSendSheet({ clientId, focusId = null, includeSent = fa
     const excel = prepared.excelFiles.map((f, i) => `
       <button type="button" class="row row-btn" data-preview="${i}">
         <span class="att-icon xl">${icon('table')}</span>
-        <span class="row-main"><span class="row-title">${esc(f.name)}</span><span class="row-sub">Excel · ${Math.max(1, Math.round(f.blob.size / 1024))} Ko · toucher pour vérifier</span></span>
+        <span class="row-main"><span class="row-title">${esc(f.name)}</span><span class="row-sub">Excel · ${selected.size} ligne${selected.size > 1 ? 's' : ''}${prepared.added ? ` (dont ${prepared.added} ajoutée${prepared.added > 1 ? 's' : ''} au modèle)` : ''} · toucher pour vérifier</span></span>
         ${icon('download', 'chev')}
       </button>`).join('');
     const photos = prepared.receipts.length ? `
@@ -129,7 +129,10 @@ export async function openSendSheet({ clientId, focusId = null, includeSent = fa
     prepareError = '';
     refreshAttachments();
     if (!selected.size) return;
-    const job = (async () => buildAttachments(client, report()))();
+    const job = (async () => {
+      await ensureRates(selection());
+      return buildAttachments(client, report());
+    })();
     preparing = job;
     try {
       const result = await job;
@@ -168,7 +171,7 @@ export async function openSendSheet({ clientId, focusId = null, includeSent = fa
       <div class="success">
         <div class="success-icon">${icon('check')}</div>
         <h2>${via === 'graph' ? 'Note de frais envoyée' : 'C’est noté'}</h2>
-        <p>${ids.length} justificatif${ids.length > 1 ? 's' : ''} · ${money(rep.total, rep.currency)}<br>${via === 'graph' ? `envoyés à ${esc(msg.to.join(', '))}` : 'marqués comme envoyés'}</p>
+        <p>${ids.length} justificatif${ids.length > 1 ? 's' : ''} · ${money(rep.displayTotal, rep.displayCurrency)}<br>${via === 'graph' ? `envoyés à ${esc(msg.to.join(', '))}` : 'marqués comme envoyés'}</p>
         <button type="button" class="btn btn-primary btn-lg btn-block" data-sheet-close>Terminé</button>
       </div>`;
     sheet.setLeft('');

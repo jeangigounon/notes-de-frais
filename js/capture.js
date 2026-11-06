@@ -7,8 +7,11 @@ import { analyzeExpense } from './ai.js';
 import { uid, toast, $ } from './ui.js';
 import { openExpenseSheet } from './views/expenseSheet.js';
 
-export function openCamera() { $('#capture-input').click(); }
-export function openFilePicker() { $('#file-input').click(); }
+// Client choisi d'avance quand on ajoute un ticket depuis la note en cours d'un client.
+let presetClientId = null;
+
+export function openCamera({ clientId = null } = {}) { presetClientId = clientId; $('#capture-input').click(); }
+export function openFilePicker({ clientId = null } = {}) { presetClientId = clientId; $('#file-input').click(); }
 
 function defaultClientId() {
   if (getClient(state.settings.lastClientId)) return state.settings.lastClientId;
@@ -33,6 +36,7 @@ export async function handleFiles(fileList, { clientId } = {}) {
         mime: prep.mime,
         fileName: prep.name,
         thumb: prep.thumb,
+        pages: prep.pages || 1,
         data: emptyData(),
         aiStatus: 'none',
       };
@@ -57,8 +61,10 @@ export function initCapture() {
     const input = $(`#${id}`);
     input.addEventListener('change', () => {
       const files = [...input.files];
+      const clientId = presetClientId;
+      presetClientId = null;
       input.value = '';
-      handleFiles(files);
+      handleFiles(files, clientId ? { clientId } : {});
     });
   }
 

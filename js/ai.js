@@ -4,6 +4,8 @@ import { state, getExpense, saveExpense } from './store.js';
 import { CATEGORIES, DOC_TYPES, PAYMENTS, num } from './fields.js';
 import { blobToBase64, todayISO } from './ui.js';
 import { CDN, loadScript } from './lib.js';
+import { pdfText, pdfFirstPageBlob } from './pdf.js';
+import { rateToEur } from './fx.js';
 
 export const MODELS = [
   { id: 'claude-opus-5-5', label: 'Claude Opus 5.5', hint: 'Le plus précis · environ 2 centimes par ticket' },
@@ -52,9 +54,9 @@ Si une information est absente ou illisible, laisse une chaîne vide (ou null po
 /* ---------- Claude ---------- */
 
 let sdkPromise;
-const loadSdk = () => (sdkPromise ||= import(CDN.anthropic).then(m => m.default));
+export const loadSdk = () => (sdkPromise ||= import(CDN.anthropic).then(m => m.default));
 
-function friendlyError(err, Anthropic) {
+export function friendlyError(err, Anthropic) {
   const detail = err?.error?.error?.message || err?.message || String(err);
   if (err instanceof Anthropic.AuthenticationError) return new Error('Clé API Claude refusée. Vérifiez-la dans Réglages.');
   if (err instanceof Anthropic.PermissionDeniedError) return new Error("Cette clé API n'a pas accès à ce modèle.");
@@ -68,7 +70,7 @@ function friendlyError(err, Anthropic) {
   return err instanceof Error ? err : new Error(detail);
 }
 
-function claudeClient(Anthropic, apiKey) {
+export function claudeClient(Anthropic, apiKey) {
   return new Anthropic({ apiKey, dangerouslyAllowBrowser: true, maxRetries: 2 });
 }
 
@@ -136,18 +138,28 @@ export async function testClaudeKey(apiKey, model) {
 
 /* ---------- OCR local ---------- */
 
-async function localExtract(exp) {
-  if (!exp.mime.startsWith('image/') || exp.mime === 'image/heic') {
-    throw new Error("L'analyse locale ne lit que les photos. Ajoutez une clé Claude dans Réglages pour les PDF.");
-  }
+async function ocr(image) {
   await loadScript(CDN.tesseract);
   const worker = await window.Tesseract.createWorker('fra');
   try {
-    const { data } = await worker.recognize(exp.file);
-    return parseReceiptText(data.text || '');
+    const { data } = await worker.recognize(image);
+    return data.text || '';
   } finally {
     await worker.terminate();
   }
+}
+
+async function localExtract(exp) {
+  if (exp.mime === 'application/pdf') {
+    // Facture électronique : le texte est dans le PDF. PDF scanné : on lit l'image de la 1re page.
+    const text = await pdfText(exp.file);
+    if (text.replace(/\s/g, '').length > 40) return parseReceiptText(text, 'Lecture du texte du PDF : vérifiez les montants.');
+    return parseReceiptText(await ocr(await pdfFirstPageBlob(exp.file)));
+  }
+  if (!exp.mime.startsWith('image/') || exp.mime === 'image/heic') {
+    throw new Error('Format illisible localement. Ajoutez une clé Claude dans Réglages.');
+  }
+  return parseReceiptText(await ocr(exp.file));
 }
 
 const AMOUNT_RX = /(?<![\d.,])(\d{1,3}(?:[ . ]\d{3})+|\d+)\s?[.,]\s?(\d{2})(?![\d%])/g;
@@ -167,7 +179,7 @@ const CATEGORY_HINTS = [
   [/fnac|mediamarkt|coolblue|papeterie|bureau|fourniture|action|brico|ikea/i, 'Fournitures & matériel'],
 ];
 
-export function parseReceiptText(text) {
+export function parseReceiptText(text, remark = 'Lecture locale approximative : vérifiez les montants.') {
   const lines = text.split(/\r?\n/).map(l => l.trim()).filter(Boolean);
   const all = lines.flatMap(amountsIn);
 
@@ -199,17 +211,18 @@ export function parseReceiptText(text) {
   const merchantLine = lines.find(l => /[a-zà-ü]{3,}/i.test(l) && !/(ticket|facture|factuur|tva|btw|tél|tel\.|www|@|date|caisse|kassa)/i.test(l)) || '';
   const merchant = merchantLine.replace(/[^\p{L}\p{N}&'’ .-]/gu, '').trim().slice(0, 60);
   const category = CATEGORY_HINTS.find(([rx]) => rx.test(text))?.[1] || '';
-  const payment = /bancontact|maestro|payconiq|debit|débit|carte|card|\bcb\b/i.test(text) ? 'Carte bancaire'
-    : /visa|mastercard|amex|american express/i.test(text) ? 'Carte de crédit'
+  const payment = /visa|mastercard|amex|american express/i.test(text) ? 'Carte de crédit'
+    : /bancontact|maestro|payconiq|debit|débit|carte|card|\bcb\b/i.test(text) ? 'Carte bancaire'
       : /esp[eè]ces|cash|contant/i.test(text) ? 'Espèces' : '';
 
   return normalize({
     isReceipt: true,
     docType: /facture|factuur|invoice/i.test(text) ? 'Facture' : 'Ticket de caisse',
-    merchant, date, description: '', category, currency: /\bUSD\b|\$/.test(text) ? 'USD' : 'EUR',
+    merchant, date, description: '', category,
+    currency: /\bCHF\b/.test(text) ? 'CHF' : /\bGBP\b|£/.test(text) ? 'GBP' : /\bUSD\b|US\$/.test(text) ? 'USD' : 'EUR',
     total, net: null, vat, vatRate, invoiceNo: '', payment,
     confidence: 'faible',
-    remark: 'Lecture locale approximative : vérifiez les montants.',
+    remark,
   }, 'local');
 }
 
@@ -293,6 +306,9 @@ async function runJob({ id, overwrite }) {
     };
     fresh.aiStatus = 'done';
     fresh.aiError = '';
+    if (fresh.data.currency && fresh.data.currency !== 'EUR' && !fresh.data.rate) {
+      try { fresh.data.rate = await rateToEur(fresh.data.currency, fresh.data.date); } catch { /* saisi à la main si besoin */ }
+    }
   } else {
     fresh.aiStatus = 'error';
     fresh.aiError = error;
