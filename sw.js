@@ -2,7 +2,7 @@
 // Fichiers du site : réseau d'abord (mises à jour immédiates), cache en secours.
 // Bibliothèques externes (versions figées) : cache d'abord.
 
-const VERSION = 'ndf-v4';
+const VERSION = 'ndf-v5';
 const SHELL = [
   './',
   'index.html',
