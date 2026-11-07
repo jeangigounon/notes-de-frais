@@ -28,6 +28,7 @@ export function render(page) {
   const p = state.profile;
   const s = state.settings;
   const account = msAccount();
+  const personal = s.msAccountType === 'personal';
   const ghTokenUrl = 'https://github.com/settings/tokens/new?scopes=gist&description=Notes%20de%20frais';
 
   page.innerHTML = `
@@ -60,17 +61,22 @@ export function render(page) {
     <div class="list form">
       <label class="field"><span>Méthode</span><select data-s="sendMethod">
         <option value="auto" ${s.sendMethod === 'auto' ? 'selected' : ''}>Automatique</option>
-        <option value="graph" ${s.sendMethod === 'graph' ? 'selected' : ''}>Microsoft 365 (envoi direct)</option>
+        <option value="graph" ${s.sendMethod === 'graph' ? 'selected' : ''}>Outlook (envoi direct)</option>
         <option value="share" ${s.sendMethod === 'share' ? 'selected' : ''}>Menu Partager (téléphone)</option>
         <option value="eml" ${s.sendMethod === 'eml' ? 'selected' : ''}>Brouillon Outlook (.eml)</option>
       </select></label>
     </div>
-    <p class="group-foot">Automatique : Microsoft 365 s'il est configuré, sinon le menu Partager sur téléphone et un brouillon Outlook sur PC.</p>
+    <p class="group-foot">Automatique : envoi direct par Outlook s'il est configuré, sinon le menu Partager sur téléphone et un brouillon Outlook sur PC.</p>
 
-    <h3 class="group-label">Microsoft 365 · envoi direct depuis votre adresse</h3>
-    <div class="list form">
+    <h3 class="group-label">Outlook · envoi direct depuis votre adresse</h3>
+    <div class="seg block">
+      <button type="button" data-ms-type="work" class="${personal ? '' : 'on'}">Compte professionnel</button>
+      <button type="button" data-ms-type="personal" class="${personal ? 'on' : ''}">Compte personnel (outlook.com…)</button>
+    </div>
+    <div class="list form" style="margin-top:12px">
       <label class="field"><span>ID d'application</span><input data-s="msClientId" autocomplete="off" spellcheck="false" placeholder="00000000-0000-0000-0000-000000000000" value="${esc(s.msClientId)}"></label>
-      <label class="field"><span>Organisation</span><input data-s="msTenant" autocomplete="off" spellcheck="false" placeholder="${esc(p.email.split('@')[1] || 'votre-domaine.be')}" value="${esc(s.msTenant)}"></label>
+      ${personal ? '' : `<label class="field"><span>Organisation</span><input data-s="msTenant" autocomplete="off" spellcheck="false" placeholder="${esc(p.email.split('@')[1] || 'votre-domaine.be')}" value="${esc(s.msTenant)}"></label>`}
+      <label class="field"><span>Adresse d'envoi</span><input data-s="msLoginHint" type="email" autocomplete="email" spellcheck="false" placeholder="${personal ? 'prenom.nom@outlook.com' : esc(p.email || 'vous@societe.be')}" value="${esc(s.msLoginHint)}"></label>
       <div class="row">
         <span class="row-main">${account ? `<span class="row-title">${esc(account.name || account.email)}</span><span class="row-sub">${esc(account.email)} · connecté</span>` : '<span class="row-sub">Non connecté</span>'}</span>
         ${account ? '<button type="button" class="btn btn-sm btn-secondary" data-act="ms-out">Se déconnecter</button>' : `<button type="button" class="btn btn-sm btn-primary" data-act="ms-in" ${s.msClientId ? '' : 'disabled'}>Se connecter</button>`}
@@ -78,13 +84,21 @@ export function render(page) {
     </div>
     <details class="help">
       <summary>${icon('info')}Comment activer l'envoi direct ?</summary>
+      ${personal ? `
+      <ol>
+        <li>L'application doit être inscrite une fois dans un annuaire Microsoft Entra <strong>où vous avez les droits</strong>. Si votre adresse personnelle est seulement <em>invitée</em> dans l'annuaire d'une organisation (identifiant en « …#EXT#@… »), le portail y répond « Erreur de chargement de vos données » : connectez-vous plutôt avec un compte qui administre un annuaire, ou créez votre propre annuaire gratuit (compte Azure gratuit ouvert avec votre adresse personnelle).</li>
+        <li>Dans <a href="https://entra.microsoft.com/#view/Microsoft_AAD_RegisteredApps/ApplicationsListBlade" target="_blank" rel="noopener">entra.microsoft.com → Inscriptions d'applications</a>, cliquez sur <em>Nouvelle inscription</em>. Nom : « Notes de frais ». Types de comptes : <em>Comptes Microsoft personnels uniquement</em>.</li>
+        <li>URI de redirection : plateforme <em>Application monopage (SPA)</em>, adresse :<br><code class="code" data-copy>${esc(redirectUri())}</code></li>
+        <li>Dans <em>Autorisations de l'API</em>, ajoutez <em>Microsoft Graph › Autorisations déléguées › Mail.Send</em>. Aucun accord d'administrateur n'est nécessaire pour un compte personnel.</li>
+        <li>Copiez l'<em>ID d'application (client)</em> ci-dessus, indiquez votre adresse outlook.com comme adresse d'envoi, puis « Se connecter ». Seuls les comptes personnels sont proposés à la connexion.</li>
+      </ol>` : `
       <ol>
         <li>Ouvrez <a href="https://entra.microsoft.com/#view/Microsoft_AAD_RegisteredApps/ApplicationsListBlade" target="_blank" rel="noopener">entra.microsoft.com → Inscriptions d'applications</a> et cliquez sur <em>Nouvelle inscription</em>.</li>
         <li>Nom : « Notes de frais ». Types de comptes : <em>Comptes dans cet annuaire d'organisation uniquement</em>.</li>
         <li>URI de redirection : plateforme <em>Application monopage (SPA)</em>, adresse :<br><code class="code" data-copy>${esc(redirectUri())}</code></li>
         <li>Copiez l'<em>ID d'application (client)</em> ci-dessus. Dans <em>Autorisations de l'API</em>, vérifiez que <em>Microsoft Graph › Mail.Send</em> (déléguée) est présente.</li>
         <li>Cliquez sur « Se connecter ». Si Microsoft demande l'accord d'un administrateur, transmettez cette page à votre service informatique, ou utilisez le menu Partager / le brouillon Outlook.</li>
-      </ol>
+      </ol>`}
     </details>
 
     <h3 class="group-label">Synchronisation PC ↔ téléphone</h3>
@@ -151,6 +165,14 @@ export function render(page) {
   page.onclick = async e => {
     const ai = e.target.closest('[data-ai]');
     if (ai) { saveSettings({ aiMode: ai.dataset.ai }); render(page); return; }
+    const msType = e.target.closest('[data-ms-type]')?.dataset.msType;
+    if (msType && msType !== state.settings.msAccountType) {
+      // Autre type de compte : la session Microsoft en cours n'est plus la bonne.
+      msSignOut();
+      saveSettings({ msAccountType: msType });
+      render(page);
+      return;
+    }
     const copy = e.target.closest('[data-copy]');
     if (copy) { navigator.clipboard?.writeText(copy.textContent).then(() => toast('Adresse copiée', { type: 'success' })); return; }
     const act = e.target.closest('[data-act]')?.dataset.act;
@@ -169,7 +191,7 @@ export function render(page) {
       btn.textContent = 'Tester la clé';
     }
     if (act === 'ms-in') { try { await msSignIn(null); } catch (err) { toast(err.message, { type: 'error' }); } }
-    if (act === 'ms-out') { msSignOut(); render(page); toast('Déconnecté de Microsoft 365'); }
+    if (act === 'ms-out') { msSignOut(); render(page); toast('Déconnecté d’Outlook'); }
     if (act === 'sync') {
       const ok = await syncNow();
       toast(ok ? 'Synchronisé' : state.sync.message, { type: ok ? 'success' : 'error' });

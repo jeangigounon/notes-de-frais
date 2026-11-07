@@ -11,7 +11,7 @@ import { thumb } from './expenses.js';
 import { ensureReceiptFile } from '../sync.js';
 
 const METHOD_LABEL = {
-  graph: 'Envoi direct depuis votre boîte Microsoft 365',
+  graph: 'Envoi direct depuis votre boîte Outlook',
   share: 'Ouvre le menu Partager : choisissez Outlook ou Mail',
   eml: 'Télécharge un brouillon à ouvrir dans Outlook, prêt à partir',
   zip: 'Télécharge une archive avec tous les fichiers',
@@ -231,7 +231,7 @@ export async function openSendSheet({ clientId, focusId = null, includeSent = fa
           busy = false;
           render();
           refreshAttachments();
-          const ok = await confirmDialog({ title: 'Connexion à Microsoft 365', message: 'Connectez-vous une fois à votre compte Microsoft pour envoyer directement depuis votre adresse.', confirm: 'Se connecter' });
+          const ok = await confirmDialog({ title: 'Connexion à Outlook', message: 'Connectez-vous une fois à votre compte Microsoft pour envoyer directement depuis votre adresse.', confirm: 'Se connecter' });
           if (ok) {
             await msSignIn({ kind: 'send', clientId: client.id, expenseIds: [...selected], to: msg.to.join(', '), cc: msg.cc.join(', '), subject: msg.subject, body: msg.body });
           }
@@ -272,7 +272,7 @@ export async function openSendSheet({ clientId, focusId = null, includeSent = fa
       const choice = await actionSheet({
         title: 'Envoyer autrement',
         actions: [
-          state.settings.msClientId && { label: 'Envoyer via Microsoft 365', value: 'graph', icon: 'mail' },
+          state.settings.msClientId && { label: 'Envoyer directement (Outlook)', value: 'graph', icon: 'mail' },
           shareable && { label: 'Partager (Outlook, Mail…)', value: 'share', icon: 'share' },
           { label: 'Brouillon Outlook (.eml)', value: 'eml', icon: 'mail' },
           { label: 'Télécharger tout (.zip)', value: 'zip', icon: 'archive' },

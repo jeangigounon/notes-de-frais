@@ -4,7 +4,7 @@ import { state, saveSettings, saveProfile, saveExpense, replaceSynced } from './
 import { CDN, loadScript } from './lib.js';
 import { blobToBase64, base64ToBlob, confirmDialog, download, todayISO, toast } from './ui.js';
 
-const SETTING_KEYS = ['aiMode', 'anthropicKey', 'model', 'sendMethod', 'msClientId', 'msTenant', 'ghToken', 'gistId'];
+const SETTING_KEYS = ['aiMode', 'anthropicKey', 'model', 'sendMethod', 'msClientId', 'msTenant', 'msAccountType', 'msLoginHint', 'ghToken', 'gistId'];
 
 const b64urlEncode = s => btoa(unescape(encodeURIComponent(s))).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
 const b64urlDecode = s => decodeURIComponent(escape(atob(s.replace(/-/g, '+').replace(/_/g, '/'))));

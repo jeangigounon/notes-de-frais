@@ -87,7 +87,11 @@ const MS_KEY = 'ndf.ms';
 const PKCE_KEY = 'ndf.pkce';
 
 export const redirectUri = () => location.origin + location.pathname;
-const msTenant = () => state.settings.msTenant || state.profile.email.split('@')[1] || 'organizations';
+// Compte personnel (outlook.com, hotmail…) : point de connexion « consumers », qui n'accepte que ces comptes
+// (pas de détour par l'annuaire d'une organisation où l'adresse serait invitée).
+const isPersonal = () => state.settings.msAccountType === 'personal';
+const msTenant = () => (isPersonal() ? 'consumers' : state.settings.msTenant || state.profile.email.split('@')[1] || 'organizations');
+const msLoginHint = () => state.settings.msLoginHint || (isPersonal() ? '' : state.profile.email);
 const msAuthority = () => `https://login.microsoftonline.com/${encodeURIComponent(msTenant())}/oauth2/v2.0`;
 
 function readTokens() {
@@ -131,7 +135,7 @@ export async function msSignIn(returnState = null) {
     code_challenge_method: 'S256',
     state: st,
   });
-  if (state.profile.email) params.set('login_hint', state.profile.email);
+  if (msLoginHint()) params.set('login_hint', msLoginHint());
   location.assign(`${msAuthority()}/authorize?${params}`);
 }
 

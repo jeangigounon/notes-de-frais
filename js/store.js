@@ -14,6 +14,8 @@ export const DEFAULT_SETTINGS = {
   sendMethod: 'auto',
   msClientId: '',
   msTenant: '',
+  msAccountType: 'work',
+  msLoginHint: '',
   ghToken: '',
   gistId: '',
   lastSync: 0,

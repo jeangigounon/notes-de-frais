@@ -102,7 +102,7 @@ async function boot() {
   try {
     const res = await msHandleRedirect();
     if (res.handled) {
-      toast('Connecté à Microsoft 365', { type: 'success' });
+      toast('Connecté à Outlook', { type: 'success' });
       if (res.returnState?.kind === 'send') resumeSend = res.returnState;
     }
   } catch (err) {
