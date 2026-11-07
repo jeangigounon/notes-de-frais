@@ -16,31 +16,6 @@ export function onStoreChange(what, detail, page) {
   return false;
 }
 
-const IT_SUBJECT = 'Demande : inscription d’application Microsoft 365 pour l’envoi de mes notes de frais';
-
-// Demande toute prête pour le service informatique (inscription de l'application dans Entra ID).
-function itRequest() {
-  return `Bonjour,
-
-J'utilise une petite application web personnelle pour mes notes de frais. Pour qu'elle puisse envoyer les e-mails directement depuis ma boîte Microsoft 365 (au lieu de passer par un brouillon), elle a besoin d'une inscription d'application dans Entra ID, que je ne peux pas créer moi-même.
-
-Pourriez-vous la créer avec ces paramètres ?
-
-- Nom : Notes de frais
-- Types de comptes pris en charge : comptes de cet annuaire d'organisation uniquement (locataire unique)
-- Plateforme : Application monopage (SPA)
-- URI de redirection : ${redirectUri()}
-- Autorisations de l'API (Microsoft Graph, déléguées) : Mail.Send, User.Read, ainsi que openid, profile et offline_access
-- Si possible : accorder le consentement administrateur pour l'organisation
-
-L'application n'utilise aucun secret client : la connexion se fait avec mon propre compte (flux « code d'autorisation + PKCE »), et elle n'envoie des e-mails qu'en mon nom, quand je le demande.
-
-Pourriez-vous ensuite me communiquer l'ID d'application (client) et l'ID de l'annuaire (locataire) ?
-
-Merci d'avance,
-${state.profile.name || ''}`;
-}
-
 function syncStatusHtml() {
   const s = state.settings;
   if (!s.ghToken) return '<span class="status-dot"></span>Désactivée';
@@ -108,13 +83,8 @@ export function render(page) {
         <li>Nom : « Notes de frais ». Types de comptes : <em>Comptes dans cet annuaire d'organisation uniquement</em>.</li>
         <li>URI de redirection : plateforme <em>Application monopage (SPA)</em>, adresse :<br><code class="code" data-copy>${esc(redirectUri())}</code></li>
         <li>Copiez l'<em>ID d'application (client)</em> ci-dessus. Dans <em>Autorisations de l'API</em>, vérifiez que <em>Microsoft Graph › Mail.Send</em> (déléguée) est présente.</li>
-        <li>Cliquez sur « Se connecter ».</li>
+        <li>Cliquez sur « Se connecter ». Si Microsoft demande l'accord d'un administrateur, transmettez cette page à votre service informatique, ou utilisez le menu Partager / le brouillon Outlook.</li>
       </ol>
-      <p class="help-note"><strong>Erreur 401 « Erreur de chargement de vos données » sur le portail, ou « Approbation de l'administrateur requise » ?</strong> Votre organisation réserve cette étape à ses administrateurs. Envoyez-leur la demande ci-dessous ; en attendant, l'envoi se fait par le menu Partager (téléphone) ou le brouillon Outlook (PC).</p>
-      <div class="help-actions">
-        <button type="button" class="btn btn-sm btn-secondary" data-act="it-copy">${icon('copy')}Copier la demande pour l'informatique</button>
-        <a class="btn btn-sm btn-secondary" href="mailto:?subject=${encodeURIComponent(IT_SUBJECT)}&body=${encodeURIComponent(itRequest())}">${icon('mail')}L'envoyer par e-mail</a>
-      </div>
     </details>
 
     <h3 class="group-label">Synchronisation PC ↔ téléphone</h3>
@@ -197,10 +167,6 @@ export function render(page) {
       }
       btn.disabled = false;
       btn.textContent = 'Tester la clé';
-    }
-    if (act === 'it-copy') {
-      try { await navigator.clipboard.writeText(itRequest()); toast('Demande copiée : collez-la dans un e-mail à votre service informatique', { type: 'success', duration: 5000 }); } catch { toast('Copie impossible sur cet appareil', { type: 'error' }); }
-      return;
     }
     if (act === 'ms-in') { try { await msSignIn(null); } catch (err) { toast(err.message, { type: 'error' }); } }
     if (act === 'ms-out') { msSignOut(); render(page); toast('Déconnecté de Microsoft 365'); }

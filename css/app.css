@@ -404,9 +404,6 @@ details > summary::-webkit-details-marker { display: none; }
 details.help > summary .i { width: 18px; height: 18px; }
 details.help ol { margin: 4px 0 0; padding: 14px 16px 14px 34px; border-radius: var(--r); background: var(--surface); color: var(--text); font-size: 14px; line-height: 1.55; }
 details.help li + li { margin-top: 6px; }
-.help-note { margin: 12px 4px 8px; font-size: 13px; line-height: 1.5; color: var(--text-2); }
-.help-note strong { color: var(--text); }
-.help-actions { display: flex; flex-wrap: wrap; gap: 8px; margin: 0 4px; }
 details.help ol .i { width: 15px; height: 15px; vertical-align: -2px; }
 details.more { margin-top: 10px; }
 details.more > summary { padding: 10px 16px; }
