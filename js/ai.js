@@ -1,6 +1,6 @@
 // Reconnaissance des justificatifs : Claude (vision) ou OCR local gratuit (Tesseract) en secours.
 
-import { state, getExpense, saveExpense } from './store.js';
+import { state, getExpense, saveExpense, deviceId } from './store.js';
 import { CATEGORIES, DOC_TYPES, PAYMENTS, num } from './fields.js';
 import { blobToBase64, todayISO } from './ui.js';
 import { CDN, loadScript } from './lib.js';
@@ -258,8 +258,9 @@ const queue = [];
 let running = false;
 
 export function analyzeExpense(id, { overwrite = false } = {}) {
-  if (!queue.some(job => job.id === id)) queue.push({ id, overwrite });
   const exp = getExpense(id);
+  if (!exp?.file) return; // photo pas encore récupérée depuis l'autre appareil
+  if (!queue.some(job => job.id === id)) queue.push({ id, overwrite });
   if (exp && exp.aiStatus !== 'pending') {
     exp.aiStatus = 'pending';
     exp.aiError = '';
@@ -277,7 +278,7 @@ async function pump() {
 
 async function runJob({ id, overwrite }) {
   const exp = getExpense(id);
-  if (!exp) return;
+  if (!exp?.file) return;
   const useClaude = state.settings.aiMode === 'claude' && !!state.settings.anthropicKey;
   let result = null;
   let error = '';
@@ -317,6 +318,9 @@ async function runJob({ id, overwrite }) {
 }
 
 // Reprend les analyses interrompues (application fermée pendant l'analyse).
+// Seulement sur l'appareil qui a pris le justificatif : l'autre reçoit le résultat par la synchro.
 export function resumePending() {
-  for (const exp of state.expenses) if (exp.aiStatus === 'pending') analyzeExpense(exp.id);
+  for (const exp of state.expenses) {
+    if (exp.aiStatus === 'pending' && exp.file && (!exp.device || exp.device === deviceId())) analyzeExpense(exp.id);
+  }
 }

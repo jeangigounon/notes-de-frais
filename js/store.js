@@ -62,6 +62,13 @@ export function emit(what, detail = {}) {
 let syncHook = null;
 export function setSyncHook(fn) { syncHook = fn; }
 
+// Identifiant de cet appareil (pour savoir où un justificatif a été pris).
+export function deviceId() {
+  let id = localStorage.getItem('ndf.device');
+  if (!id) { id = uid(); localStorage.setItem('ndf.device', id); }
+  return id;
+}
+
 /* ---------- Profil & réglages ---------- */
 
 export function saveProfile(patch) {
@@ -168,20 +175,33 @@ export async function loadExpenses() {
 export const getExpense = id => state.expenses.find(e => e.id === id) || null;
 export const pendingExpenses = () => state.expenses.filter(e => e.status !== 'sent');
 
-export async function saveExpense(exp) {
-  exp.updatedAt = Date.now();
+// `touch: false` : enregistrement technique (synchro) qui ne compte pas comme une modification.
+export async function saveExpense(exp, { touch = true, sync = true } = {}) {
+  if (touch) exp.updatedAt = Date.now();
   await idb('readwrite', s => s.put(exp));
   const i = state.expenses.findIndex(e => e.id === exp.id);
   if (i >= 0) state.expenses[i] = exp; else { state.expenses.push(exp); sortExpenses(); }
   updateBadge();
   emit('expenses', { id: exp.id });
+  if (sync) syncHook?.();
 }
 
-export async function deleteExpense(id) {
+// Justificatifs supprimés : mémorisés pour que la suppression atteigne les autres appareils.
+const TOMBSTONES = 'ndf.deletedExpenses';
+export const expenseTombstones = () => read(TOMBSTONES, {});
+export function setExpenseTombstones(map) { write(TOMBSTONES, map); }
+
+export async function deleteExpense(id, { sync = true } = {}) {
+  const exp = getExpense(id);
   await idb('readwrite', s => s.delete(id));
   state.expenses = state.expenses.filter(e => e.id !== id);
+  if (sync) {
+    setExpenseTombstones({ ...expenseTombstones(), [id]: { at: Date.now(), receipt: exp?.receipt || null } });
+    syncHook?.();
+  }
   updateBadge();
   emit('expenses', { id, deleted: true });
+  return exp;
 }
 
 function updateBadge() {

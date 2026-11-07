@@ -1,6 +1,6 @@
 // Ajout de justificatifs : appareil photo, sélection de fichiers, glisser-déposer, coller.
 
-import { state, saveExpense, getClient, activeClients } from './store.js';
+import { state, saveExpense, getClient, activeClients, deviceId } from './store.js';
 import { emptyData } from './fields.js';
 import { prepareFile } from './image.js';
 import { analyzeExpense } from './ai.js';
@@ -34,6 +34,7 @@ export async function handleFiles(fileList, { clientId } = {}) {
       const exp = {
         id: uid(),
         createdAt: Date.now(),
+        device: deviceId(),
         status: 'pending',
         clientId: clientId ?? defaultClientId(),
         file: prep.blob,

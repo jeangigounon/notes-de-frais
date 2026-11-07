@@ -8,6 +8,7 @@ import {
   canShareFiles, buildEml, buildZip, splitEmails, isEmail, ensureRates,
 } from '../mail.js';
 import { thumb } from './expenses.js';
+import { ensureReceiptFile } from '../sync.js';
 
 const METHOD_LABEL = {
   graph: 'Envoi direct depuis votre boîte Microsoft 365',
@@ -130,6 +131,8 @@ export async function openSendSheet({ clientId, focusId = null, includeSent = fa
     refreshAttachments();
     if (!selected.size) return;
     const job = (async () => {
+      // Photos prises sur l'autre appareil : on les récupère avant de construire l'e-mail.
+      await Promise.all(selection().map(e => ensureReceiptFile(e).catch(() => null)));
       await ensureRates(selection());
       return buildAttachments(client, report());
     })();

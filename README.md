@@ -26,7 +26,7 @@ Le téléphone sert à photographier et envoyer en deux gestes ; le PC à config
   - **Brouillon Outlook** (.eml) sur PC, qui s'ouvre prêt à partir ;
   - archive **.zip**.
 - **Rappel** : l'accueil affiche ce qui attend d'être envoyé, par client, et signale les tickets oubliés depuis plus d'une semaine. Une pastille sur l'icône de l'app compte les justificatifs en attente.
-- **Synchronisation PC ↔ téléphone** des clients (modèles Excel compris) via un Gist GitHub secret, et **QR code** pour configurer le téléphone sans rien retaper.
+- **Synchronisation PC ↔ téléphone** des clients (modèles Excel compris) et des justificatifs avec leurs photos, via des Gists GitHub secrets, et **QR code** pour configurer le téléphone sans rien retaper.
 - **Sauvegarde / restauration** complète en un fichier.
 
 ## Mise en route
@@ -48,7 +48,9 @@ Coût indicatif par ticket : environ 2 centimes avec Claude Opus 5.5 (par défau
 2. Collez-le dans **Réglages → Synchronisation** sur le PC.
 3. Sur le PC, **Réglages → Afficher le QR code de configuration**, puis scannez-le avec l'appareil photo de l'iPhone : clé Claude, synchronisation et profil sont copiés.
 
-Les clients et le profil sont alors partagés entre vos appareils. Les photos des tickets restent sur l'appareil qui les a prises.
+Le profil, les clients et les justificatifs (avec leurs photos et PDF) sont alors partagés entre vos appareils : un ticket photographié sur le téléphone apparaît sur le PC, et inversement. La synchronisation se fait à l'ouverture, en revenant sur l'app, toutes les deux minutes quand elle est ouverte, et après chaque modification.
+
+Les photos sont déposées dans des Gists secrets (non listés, accessibles uniquement avec leur lien) et retirées de GitHub 30 jours après l'envoi de la note ; elles restent sur vos appareils.
 
 ### 4. Envoi direct via Microsoft 365 (facultatif)
 

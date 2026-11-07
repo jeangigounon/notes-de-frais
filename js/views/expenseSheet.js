@@ -8,6 +8,7 @@ import { rateToEur } from '../fx.js';
 import { pdfThumb } from '../pdf.js';
 import { openCamera, openFilePicker } from '../capture.js';
 import { openSendSheet } from './sendSheet.js';
+import { ensureReceiptFile } from '../sync.js';
 
 const TEXT_FIELDS = ['merchant', 'description', 'date', 'category', 'docType', 'vatRate', 'invoiceNo', 'payment', 'currency', 'notes'];
 const MONEY_FIELDS = ['total', 'net', 'vat'];
@@ -93,6 +94,7 @@ export function openExpenseSheet(id, { isNew = false } = {}) {
 
   sheet.body.innerHTML = `
     <button type="button" class="exp-preview" data-act="view" aria-label="Agrandir">${preview}<span class="zoom">${icon('eye')}</span></button>
+    ${!exp.file ? `<div class="banner info" data-remote>${exp.receipt ? spinner() : icon('cloud')}<span>${exp.receipt ? 'Ajouté sur un autre appareil : récupération de la photo…' : 'Ajouté sur un autre appareil : la photo arrivera à sa prochaine synchronisation.'}</span></div>` : ''}
     <div data-ai>${aiStatusHtml(exp)}</div>
     ${sent ? `<div class="banner success">${icon('check')}<span>Envoyé ${exp.sentAt ? 'le ' + fmtDate(new Date(exp.sentAt).toISOString().slice(0, 10)) : ''}${sentTo ? ' à ' + esc(sentTo.name) : ''}.</span><button type="button" class="btn btn-sm btn-secondary" data-act="unsend">Remettre à envoyer</button></div>` : ''}
 
@@ -200,6 +202,7 @@ export function openExpenseSheet(id, { isNew = false } = {}) {
     if (detail.id !== id) { body.querySelector('[data-actions]').innerHTML = actionsHtml(); return; }
     const fresh = getExpense(id);
     if (!fresh) return;
+    if (fresh.file) body.querySelector('[data-remote]')?.remove();
     const prev = lastStatus;
     lastStatus = fresh.aiStatus;
     body.querySelector('[data-ai]').innerHTML = aiStatusHtml(fresh);
@@ -258,6 +261,7 @@ export function openExpenseSheet(id, { isNew = false } = {}) {
     if (!act) return;
     if (act === 'view') return viewFile(exp);
     if (act === 'reanalyze') {
+      if (!exp.file) { toast('La photo n’est pas encore arrivée sur cet appareil.'); return; }
       touched.clear();
       readForm();
       await saveExpense(exp);
@@ -315,7 +319,11 @@ export function openExpenseSheet(id, { isNew = false } = {}) {
   };
 }
 
-export function viewFile(exp) {
+export async function viewFile(exp) {
+  if (!exp.file) {
+    try { exp = await ensureReceiptFile(exp); } catch { /* signalé ci-dessous */ }
+    if (!exp.file) { toast('La photo n’est pas encore arrivée sur cet appareil.'); return; }
+  }
   const url = URL.createObjectURL(exp.file);
   if (exp.mime === 'application/pdf' || !exp.mime.startsWith('image/')) {
     window.open(url, '_blank');

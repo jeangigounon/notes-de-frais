@@ -54,8 +54,15 @@ export async function buildAttachments(client, report) {
   } else if (excel.mode !== 'none') {
     sheets = await buildSimple(excel.simple, report, baseName);
   }
-  const receipts = client.attachReceipts === false ? [] : report.items.map(it => ({ name: it.fileName, blob: it.exp.file, mime: it.exp.mime }));
-  return { files: [...sheets.files, ...receipts], excelFiles: sheets.files, receipts, warnings: sheets.warnings || [], added: sheets.added || 0 };
+  const warnings = [...(sheets.warnings || [])];
+  const receipts = [];
+  if (client.attachReceipts !== false) {
+    for (const it of report.items) {
+      if (it.exp.file) receipts.push({ name: it.fileName, blob: it.exp.file, mime: it.exp.mime });
+      else warnings.push(`La photo de « ${it.merchant || 'Justificatif ' + it.index} » n'est pas encore arrivée sur cet appareil : elle ne sera pas jointe.`);
+    }
+  }
+  return { files: [...sheets.files, ...receipts], excelFiles: sheets.files, receipts, warnings, added: sheets.added || 0 };
 }
 
 export function preferredMethod() {

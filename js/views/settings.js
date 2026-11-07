@@ -92,7 +92,7 @@ export function render(page) {
       <label class="field"><span>Jeton GitHub</span><input data-s="ghToken" type="password" autocomplete="off" spellcheck="false" placeholder="ghp_…" value="${esc(s.ghToken)}"></label>
       <div class="row"><span class="row-sub sync-status" data-sync-status>${syncStatusHtml()}</span><button type="button" class="btn btn-sm btn-secondary" data-act="sync" ${s.ghToken ? '' : 'disabled'}>${icon('sync')}Synchroniser</button></div>
     </div>
-    <p class="group-foot">Votre profil et vos clients (modèles Excel compris) sont copiés dans un Gist secret de votre compte GitHub. <a href="${ghTokenUrl}" target="_blank" rel="noopener">Créer un jeton</a> avec uniquement l'autorisation « gist ». Les photos des tickets restent sur l'appareil qui les a prises.</p>
+    <p class="group-foot">Votre profil, vos clients (modèles Excel compris) et vos justificatifs avec leurs photos sont copiés dans des Gists secrets de votre compte GitHub : non listés, accessibles seulement avec leur lien. Les photos des justificatifs envoyés sont retirées de GitHub après 30 jours (elles restent sur vos appareils). <a href="${ghTokenUrl}" target="_blank" rel="noopener">Créer un jeton</a> avec uniquement l'autorisation « gist ».</p>
 
     <h3 class="group-label">Configurer mon téléphone</h3>
     <div class="list">

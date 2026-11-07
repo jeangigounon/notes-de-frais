@@ -262,6 +262,7 @@ strong { font-weight: 600; }
 }
 .banner > .i:first-child { color: var(--orange-text); }
 .banner > span { flex: 1; }
+.banner > .spinner { flex: none; }
 .banner.info { background: var(--accent-soft); }
 .banner.info > .i:first-child { color: var(--accent); }
 .banner.success { background: var(--green-soft); margin: 0 0 16px; }
