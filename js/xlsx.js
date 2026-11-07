@@ -200,8 +200,9 @@ export function templateCapacity(tpl, sheet) {
 /* ---------- Écriture dans un modèle ---------- */
 
 class SheetWriter {
-  constructor(doc, styles) {
+  constructor(doc, styles, shared = []) {
     this.doc = doc;
+    this.shared = shared;
     this.ns = doc.documentElement.namespaceURI || NS_MAIN;
     this.styles = styles;
     this.sheetData = all(doc, 'sheetData')[0];
@@ -327,14 +328,228 @@ class SheetWriter {
         }
       }
     }
-    // Valeurs de formules en cache obsolètes : Excel recalcule à l'ouverture.
-    for (const f of all(this.doc, 'f')) {
-      const c = f.parentElement;
-      kid(c, 'v')?.remove();
-      c.removeAttribute('t');
-    }
+    // Résultats des formules écrits dans le fichier : les totaux s'affichent même sans recalcul
+    // (mode protégé d'Excel, aperçus Outlook / iPhone). Excel recalcule de toute façon à l'ouverture.
+    computeFormulas(this.doc, this.shared);
     kid(this.doc.documentElement, 'dimension')?.remove();
     return serialize(this.doc);
+  }
+}
+
+/* ---------- Calcul des formules ---------- */
+
+const FAIL = Symbol('fail');
+
+// Décale les références relatives d'une formule (formules partagées).
+function offsetFormula(formula, dr, dc) {
+  return formula.split(/("(?:[^"]|"")*")/).map((part, i) => (i % 2 ? part : part.replace(REF_RX,
+    (m, prefix, d1, c1, d2, r1, d3, c2, d4, r2) => {
+      const one = (d, c, dd, r) => `${d}${d ? c : numToCol(colToNum(c) + dc)}${dd}${dd ? r : +r + dr}`;
+      return `${prefix || ''}${one(d1, c1, d2, r1)}${c2 ? ':' + one(d3, c2, d4, r2) : ''}`;
+    }))).join('');
+}
+
+function tokenize(s) {
+  const tokens = [];
+  let i = 0;
+  while (i < s.length) {
+    const rest = s.slice(i);
+    if (/^\s/.test(rest)) { i++; continue; }
+    if (rest[0] === '"') {
+      let j = i + 1;
+      let str = '';
+      while (j < s.length && !(s[j] === '"' && s[j + 1] !== '"')) { str += s[j]; j += s[j] === '"' ? 2 : 1; }
+      tokens.push({ t: 'str', v: str });
+      i = j + 1;
+      continue;
+    }
+    if (/^(?:'[^']+'|[A-Za-z_][\w.]*)!/.test(rest)) throw FAIL; // autre feuille : non géré
+    let m = /^\$?([A-Z]{1,3})\$?(\d+)(?::\$?([A-Z]{1,3})\$?(\d+))?(?![\w(])/.exec(rest);
+    if (m) {
+      tokens.push(m[3] ? { t: 'range', c1: colToNum(m[1]), r1: +m[2], c2: colToNum(m[3]), r2: +m[4] } : { t: 'ref', ref: `${m[1]}${m[2]}` });
+      i += m[0].length;
+      continue;
+    }
+    if ((m = /^\d+(?:\.\d+)?(?:E[+-]?\d+)?/i.exec(rest))) { tokens.push({ t: 'num', v: parseFloat(m[0]) }); i += m[0].length; continue; }
+    if ((m = /^(TRUE|FALSE)(?![\w(])/i.exec(rest))) { tokens.push({ t: 'bool', v: m[1].toUpperCase() === 'TRUE' }); i += m[0].length; continue; }
+    if ((m = /^([A-Z][A-Z0-9.]*)\(/i.exec(rest))) { tokens.push({ t: 'fn', v: m[1].toUpperCase() }); i += m[0].length; continue; }
+    if ((m = /^(<>|<=|>=|[-+*/^&=<>(),;%])/.exec(rest))) { tokens.push({ t: 'op', v: m[1] }); i += m[1].length; continue; }
+    throw FAIL;
+  }
+  return tokens;
+}
+
+function evaluate(formula, valueOf, rangeOf) {
+  const tk = tokenize(formula);
+  let pos = 0;
+  const peek = () => tk[pos];
+  const next = () => tk[pos++];
+  const isOp = v => peek()?.t === 'op' && peek().v === v;
+  const num = x => {
+    if (x == null || x === '') return 0;
+    if (typeof x === 'boolean') return x ? 1 : 0;
+    if (typeof x === 'number') return x;
+    const n = Number(x);
+    if (isFinite(n)) return n;
+    throw FAIL;
+  };
+  const numbers = args => args.flatMap(a => (a?.range ? a.range.filter(v => typeof v === 'number') : [num(a)]));
+  const round = (x, n, mode) => {
+    const k = 10 ** num(n);
+    const v = Math.abs(num(x)) * k;
+    const r = mode === 'up' ? Math.ceil(v - 1e-9) : mode === 'down' ? Math.floor(v + 1e-9) : Math.round(v);
+    return Math.sign(num(x)) * r / k;
+  };
+  const call = (name, args) => {
+    switch (name) {
+      case 'SUM': return numbers(args).reduce((a, b) => a + b, 0);
+      case 'AVERAGE': { const n = numbers(args); if (!n.length) throw FAIL; return n.reduce((a, b) => a + b, 0) / n.length; }
+      case 'MIN': { const n = numbers(args); return n.length ? Math.min(...n) : 0; }
+      case 'MAX': { const n = numbers(args); return n.length ? Math.max(...n) : 0; }
+      case 'COUNT': return numbers(args).length;
+      case 'ROUND': return round(args[0], args[1] ?? 0);
+      case 'ROUNDUP': return round(args[0], args[1] ?? 0, 'up');
+      case 'ROUNDDOWN': return round(args[0], args[1] ?? 0, 'down');
+      case 'ABS': return Math.abs(num(args[0]));
+      case 'IF': return num(args[0]) ? (args[1] ?? true) : (args[2] ?? false);
+      case 'AND': return args.every(a => num(a));
+      case 'OR': return args.some(a => num(a));
+      default: throw FAIL;
+    }
+  };
+  const compare = (a, b, op) => {
+    const [x, y] = typeof a === 'string' || typeof b === 'string' ? [String(a ?? ''), String(b ?? '')] : [num(a), num(b)];
+    return { '=': x === y, '<>': x !== y, '<': x < y, '>': x > y, '<=': x <= y, '>=': x >= y }[op];
+  };
+  function primary() {
+    const t = next();
+    if (!t) throw FAIL;
+    if (t.t === 'num' || t.t === 'str' || t.t === 'bool') return t.v;
+    if (t.t === 'ref') { const v = valueOf(t.ref); if (v === FAIL) throw FAIL; return v; }
+    if (t.t === 'op' && t.v === '(') { const v = comparison(); if (!isOp(')')) throw FAIL; next(); return v; }
+    if (t.t === 'fn') {
+      const args = [];
+      if (!isOp(')')) {
+        do { args.push(peek()?.t === 'range' && [',', ';', ')'].includes(tk[pos + 1]?.v) ? { range: rangeOf(next()) } : comparison()); }
+        while ((isOp(',') || isOp(';')) && next());
+      }
+      if (!isOp(')')) throw FAIL;
+      next();
+      return call(t.v, args);
+    }
+    throw FAIL;
+  }
+  function unary() {
+    if (isOp('-')) { next(); return -num(unary()); }
+    if (isOp('+')) { next(); return unary(); }
+    let v = primary();
+    while (isOp('%')) { next(); v = num(v) / 100; }
+    return v;
+  }
+  function power() { let a = unary(); while (isOp('^')) { next(); a = num(a) ** num(unary()); } return a; }
+  function product() {
+    let a = power();
+    while (isOp('*') || isOp('/')) {
+      const op = next().v;
+      const b = num(power());
+      if (op === '/' && b === 0) throw FAIL;
+      a = op === '*' ? num(a) * b : num(a) / b;
+    }
+    return a;
+  }
+  function sum() {
+    let a = product();
+    while (isOp('+') || isOp('-')) { const op = next().v; const b = product(); a = op === '+' ? num(a) + num(b) : num(a) - num(b); }
+    return a;
+  }
+  function concat() { let a = sum(); while (isOp('&')) { next(); a = String(a ?? '') + String(sum() ?? ''); } return a; }
+  function comparison() {
+    let a = concat();
+    while (peek()?.t === 'op' && ['=', '<>', '<', '>', '<=', '>='].includes(peek().v)) { const op = next().v; a = compare(a, concat(), op); }
+    return a;
+  }
+  const out = comparison();
+  if (pos !== tk.length) throw FAIL;
+  return out;
+}
+
+function computeFormulas(doc, shared = []) {
+  const ns = doc.documentElement.namespaceURI || NS_MAIN;
+  const cells = new Map();
+  for (const c of all(doc, 'c')) {
+    const p = splitRef(c.getAttribute('r'));
+    if (!p) continue;
+    const f = kid(c, 'f');
+    const v = kid(c, 'v');
+    const t = c.getAttribute('t');
+    let value = null;
+    if (!f) {
+      if (t === 's' && v) value = shared[+v.textContent] ?? '';
+      else if (t === 'inlineStr') value = textOf(kid(c, 'is') || c);
+      else if (t === 'str' && v) value = v.textContent;
+      else if (t === 'b' && v) value = v.textContent === '1';
+      else if (t === 'e') value = FAIL;
+      else if (v) value = Number(v.textContent);
+    }
+    cells.set(`${p.col}${p.r}`, { el: c, f, p, value, formula: null });
+  }
+  const masters = {};
+  for (const cell of cells.values()) {
+    if (cell.f?.getAttribute('t') === 'shared' && cell.f.textContent) masters[cell.f.getAttribute('si')] = { text: cell.f.textContent, p: cell.p };
+  }
+  for (const cell of cells.values()) {
+    const f = cell.f;
+    if (!f || f.getAttribute('t') === 'array') continue;
+    if (f.getAttribute('t') === 'shared' && !f.textContent) {
+      const m = masters[f.getAttribute('si')];
+      cell.formula = m ? offsetFormula(m.text, cell.p.r - m.p.r, cell.p.c - m.p.c) : null;
+    } else {
+      cell.formula = f.textContent;
+    }
+  }
+  const memo = new Map();
+  const visiting = new Set();
+  const valueOf = ref => {
+    const cell = cells.get(ref);
+    if (!cell) return null;
+    if (!cell.f) return cell.value;
+    if (memo.has(ref)) return memo.get(ref);
+    if (visiting.has(ref) || !cell.formula) return FAIL;
+    visiting.add(ref);
+    let out;
+    try { out = evaluate(cell.formula, valueOf, rangeOf); } catch { out = FAIL; }
+    visiting.delete(ref);
+    memo.set(ref, out);
+    return out;
+  };
+  const rangeOf = r => {
+    const out = [];
+    for (const [ref, cell] of cells) {
+      if (cell.p.r < r.r1 || cell.p.r > r.r2 || cell.p.c < r.c1 || cell.p.c > r.c2) continue;
+      const v = valueOf(ref);
+      if (v === FAIL) throw FAIL;
+      out.push(v);
+    }
+    return out;
+  };
+  for (const [ref, cell] of cells) {
+    if (!cell.f) continue;
+    const res = valueOf(ref);
+    kid(cell.el, 'v')?.remove();
+    cell.el.removeAttribute('t');
+    if (res === FAIL || res == null) continue;
+    const v = doc.createElementNS(ns, 'v');
+    if (typeof res === 'number') {
+      if (!isFinite(res)) continue;
+      v.textContent = String(Math.round(res * 1e10) / 1e10);
+    } else if (typeof res === 'boolean') {
+      cell.el.setAttribute('t', 'b');
+      v.textContent = res ? '1' : '0';
+    } else {
+      cell.el.setAttribute('t', 'str');
+      v.textContent = String(res);
+    }
+    cell.el.append(v);
   }
 }
 
@@ -538,7 +753,7 @@ async function writeTemplate(book, sheet, tpl, report, capacity) {
     at = capacity >= 2 ? tpl.lineRow + capacity - 1 : tpl.lineRow + 1;
     await insertRows(book, doc, sheet, at, extra);
   }
-  const w = new SheetWriter(doc, book.styles);
+  const w = new SheetWriter(doc, book.styles, book.shared);
   for (const [ref, m] of Object.entries(tpl.cells || {})) {
     const def = fieldDef(m.field);
     if (def) w.set(shiftRef(ref, at, extra), singleValue(m.field, report, m.value, m.currency), def.type);
@@ -569,7 +784,7 @@ export async function fillTemplate(tpl, report, baseName) {
   const warnings = placementWarnings(tpl, report);
   const added = await writeTemplate(book, sheet, tpl, report, capacity);
   const blob = await book.zip.generateAsync({ type: 'blob', mimeType: XLSX_MIME, compression: 'DEFLATE' });
-  return { files: [{ name: `${baseName}.xlsx`, blob, mime: XLSX_MIME }], capacity, added, warnings };
+  return { files: [{ name: `${baseName}.xlsx`, blob, mime: XLSX_MIME }], capacity, added, warnings, content };
 }
 
 /* ---------- Anciens fichiers .xls ---------- */

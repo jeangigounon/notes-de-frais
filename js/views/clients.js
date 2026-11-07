@@ -6,6 +6,7 @@ import { CLIENT_COLORS, LINE_FIELDS, PLACEHOLDERS, DEFAULT_SIMPLE_COLUMNS, field
 import { openWorkbook, readSheet, templateCapacity, convertXlsToXlsx } from '../xlsx.js';
 import { makeReport, buildAttachments } from '../mail.js';
 import { analyzeTemplate, canAnalyzeTemplates } from '../templateAI.js';
+import { detectStructure, mappingMissesGroups } from '../templateAuto.js';
 import { openMapper } from './mapper.js';
 import { initials } from './home.js';
 
@@ -151,10 +152,11 @@ function renderEditor(host, client) {
             <span class="row-main"><span class="row-title">${esc(tpl.name)}</span><span class="row-sub">Feuille « ${esc(tpl.sheet)} » · ${esc(templateSummary(tpl))}</span></span>
           </div>
           ${tpl.ai?.summary ? `<div class="row ai-summary"><span class="att-icon ai">${icon('sparkles')}</span><span class="row-sub">${esc(tpl.ai.summary)}</span></div>` : ''}
-          ${tpl.ai?.error ? `<div class="row"><span class="att-icon warn">${icon('alert')}</span><span class="row-sub">L'analyse par Claude a échoué : ${esc(tpl.ai.error)}</span></div>` : ''}
+          ${tpl.ai?.error ? `<div class="row"><span class="att-icon warn">${icon('alert')}</span><span class="row-sub">L'analyse du modèle a échoué : ${esc(tpl.ai.error)}</span></div>` : ''}
+          <div data-tpl-check></div>
           ${!tpl.lineRow ? `<div class="row"><span class="att-icon warn">${icon('alert')}</span><span class="row-sub">Indiquez où commence le tableau des dépenses : lancez l'analyse par Claude, ou cliquez sur une cellule de la première ligne vide et choisissez un champ « Par justificatif ».</span></div>` : ''}
           <div class="row tpl-actions">
-            <button type="button" class="btn ${tpl.lineRow ? 'btn-secondary' : 'btn-primary'}" data-act="analyze">${icon('sparkles')}${tpl.ai?.summary ? 'Analyser à nouveau' : 'Analyser avec Claude'}</button>
+            <button type="button" class="btn ${tpl.lineRow ? 'btn-secondary' : 'btn-primary'}" data-act="analyze">${icon('sparkles')}${tpl.ai?.summary ? 'Analyser à nouveau' : canAnalyzeTemplates() ? 'Analyser avec Claude' : 'Analyse automatique'}</button>
             <button type="button" class="btn ${tpl.lineRow ? 'btn-primary' : 'btn-secondary'}" data-act="map">${icon('grid')}Vérifier les cellules</button>
             <button type="button" class="btn btn-secondary" data-act="replace">Remplacer</button>
             <button type="button" class="btn btn-plain danger" data-act="remove-tpl">Retirer</button>
@@ -201,22 +203,69 @@ function renderEditor(host, client) {
 
       <button type="button" class="btn btn-plain danger delete-btn" data-act="delete">${icon('trash')}Supprimer ce client</button>
     `;
+    checkTemplate();
   };
+
+  // Garde-fou : le modèle ventile les montants par type de dépense mais la configuration les met dans une seule colonne.
+  let checkKey = '';
+  let checkResult = null;
+  async function checkTemplate() {
+    const tpl = c.excel.mode === 'template' && c.excel.template;
+    if (!tpl?.data) return;
+    const key = `${tpl.data.length}:${tpl.sheet}:${JSON.stringify(tpl.lineCols)}`;
+    if (key !== checkKey) {
+      checkKey = key;
+      try {
+        const book = await openWorkbook(tpl.data);
+        const sheet = book.sheets.find(s => s.name === tpl.sheet) || book.sheets[0];
+        checkResult = mappingMissesGroups(tpl, await readSheet(book, sheet.path));
+      } catch { checkResult = null; }
+    }
+    const slot = host.querySelector('[data-tpl-check]');
+    if (!slot || !checkResult) return;
+    slot.innerHTML = `<div class="row tpl-check"><span class="att-icon warn">${icon('alert')}</span>
+      <span class="row-sub">Ce modèle répartit les montants par type de dépense (${esc(checkResult.groups.map(g => g.name).join(', '))}), mais la configuration actuelle met tous les montants dans une seule colonne.</span>
+      <button type="button" class="btn btn-sm btn-primary" data-act="apply-auto">Corriger</button></div>`;
+  }
 
   draw();
 
-  // Claude lit le modèle et propose le placement de chaque information.
+  // Analyse du modèle : Claude si possible, complété (ou remplacé) par la lecture automatique de la structure.
   async function runAnalysis(book, sheet) {
     const tpl = c.excel.template;
+    const withClaude = canAnalyzeTemplates();
     const wait = openSheet({
       title: 'Analyse du modèle',
       left: '',
-      body: `<div class="analysis">${spinner()}<strong>Claude étudie le modèle…</strong><span>Structure, formules, colonnes par type de dépense et par devise. Environ 20 secondes.</span></div>`,
+      body: `<div class="analysis">${spinner()}<strong>${withClaude ? 'Claude étudie le modèle…' : 'Lecture du modèle…'}</strong><span>Structure, formules, colonnes par type de dépense et par devise.${withClaude ? ' Environ 20 secondes.' : ''}</span></div>`,
     });
     try {
       const content = await readSheet(book, sheet.path);
-      const res = await analyzeTemplate(content, { sheetName: sheet.name, fileName: tpl.originalName || tpl.name, otherSheets: book.sheets.filter(s => s.path !== sheet.path).map(s => s.name) });
-      Object.assign(tpl, { sheet: sheet.name, lineRow: res.lineRow, lineCols: res.lineCols, cells: res.cells, capacity: null, ai: { summary: res.summary, warnings: res.warnings, at: Date.now() } });
+      const auto = detectStructure(content);
+      let res = null;
+      let claudeError = '';
+      if (withClaude) {
+        try {
+          res = await analyzeTemplate(content, { sheetName: sheet.name, fileName: tpl.originalName || tpl.name, otherSheets: book.sheets.filter(s => s.path !== sheet.path).map(s => s.name) });
+        } catch (err) {
+          console.error(err);
+          claudeError = err.message || String(err);
+        }
+      }
+      if (res && auto?.groups.length && !Object.values(res.lineCols).some(d => d.categories?.length || d.others)) {
+        // Claude a manqué la ventilation par type / devise : on reprend celle lue automatiquement.
+        for (const [col, d] of Object.entries(res.lineCols)) if (['total', 'net', 'vat', 'totalEur'].includes(d.field)) delete res.lineCols[col];
+        Object.assign(res.lineCols, Object.fromEntries(Object.entries(auto.lineCols).filter(([, d]) => d.categories || d.others)));
+        res.lineRow ||= auto.lineRow;
+        res.warnings.push('Colonnes par type de dépense et par devise complétées par la lecture automatique : vérifiez-les.');
+      }
+      if (res) {
+        for (const [ref, m] of Object.entries(auto?.cells || {})) if (m.field === 'fxRate' && !res.cells[ref]) res.cells[ref] = m;
+      } else if (auto) {
+        res = { ...auto, fileName: '', warnings: [...(claudeError ? [`Claude indisponible (${claudeError}) : configuration faite par lecture automatique.`] : []), ...auto.warnings] };
+      }
+      if (!res) throw new Error(claudeError || 'Structure du modèle non reconnue : configurez les cellules à la main.');
+      Object.assign(tpl, { sheet: sheet.name, lineRow: res.lineRow, lineCols: res.lineCols, cells: res.cells, capacity: null, ai: { summary: res.summary, warnings: res.warnings, at: Date.now(), engine: withClaude && !claudeError ? 'claude' : 'auto' } });
       if (res.fileName) c.excel.fileName = res.fileName;
       save.flush();
       return true;
@@ -232,15 +281,6 @@ function renderEditor(host, client) {
   }
 
   async function analyzeCurrent() {
-    if (!canAnalyzeTemplates()) {
-      const go = await confirmDialog({
-        title: 'Clé Claude absente sur cet appareil',
-        message: 'La clé Claude est enregistrée appareil par appareil. Ajoutez-la dans Réglages (ou utilisez le QR code de configuration), puis relancez l’analyse.',
-        confirm: 'Ouvrir Réglages',
-      });
-      if (go) location.hash = '#/reglages';
-      return;
-    }
     try {
       const book = await openWorkbook(c.excel.template.data);
       const sheet = book.sheets.find(s => s.name === c.excel.template.sheet) || book.sheets[0];
@@ -281,7 +321,7 @@ function renderEditor(host, client) {
       if (!c.excel.fileName || c.excel.fileName === 'Note de frais {nom} {periode}') c.excel.fileName = file.name.replace(/\.xlsx?$/i, '') + ' {periode}';
       save.flush();
       draw();
-      if (canAnalyzeTemplates()) await runAnalysis(book, visible);
+      await runAnalysis(book, visible);
       draw();
       openMapper(c, () => { save.flush(); draw(); });
     } catch (err) {
@@ -339,7 +379,7 @@ function renderEditor(host, client) {
     const act = t.dataset.act;
     if (act === 'upload' || act === 'replace') return loadTemplate(await pickFile('.xlsx,.xls,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,application/vnd.ms-excel'));
     if (act === 'map') return openMapper(c, () => { save.flush(); draw(); });
-    if (act === 'analyze') return analyzeCurrent();
+    if (act === 'analyze' || act === 'apply-auto') return analyzeCurrent();
     if (act === 'remove-tpl') {
       if (await confirmDialog({ title: 'Retirer le modèle ?', message: 'La configuration des cellules sera perdue.', confirm: 'Retirer', destructive: true })) {
         c.excel.template = null;

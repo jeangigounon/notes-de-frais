@@ -2,7 +2,7 @@
 
 import { state, getExpense, saveExpense, deviceId } from './store.js';
 import { CATEGORIES, DOC_TYPES, PAYMENTS, num } from './fields.js';
-import { blobToBase64, todayISO } from './ui.js';
+import { blobToBase64, todayISO, parseISO } from './ui.js';
 import { CDN, loadScript } from './lib.js';
 import { pdfText, pdfFirstPageBlob } from './pdf.js';
 import { rateToEur } from './fx.js';
@@ -228,9 +228,26 @@ export function parseReceiptText(text, remark = 'Lecture locale approximative : 
 
 /* ---------- Normalisation ---------- */
 
+// Année mal lue (« 06 » pour 2026, ticket froissé…) : une date à plus d'un an ou dans le futur
+// est ramenée à l'année en cours (ou précédente) si cela la rend plausible.
+function plausibleDate(iso) {
+  const d = parseISO(iso);
+  if (!d) return { date: '' };
+  const now = new Date();
+  const days = x => (now - x) / 86400000;
+  if (days(d) <= 400 && days(d) >= -7) return { date: iso };
+  for (const y of [now.getFullYear(), now.getFullYear() - 1]) {
+    const c = new Date(y, d.getMonth(), d.getDate(), 12);
+    if (days(c) <= 400 && days(c) >= -7) return { date: todayISO(c), fixedFrom: iso };
+  }
+  return { date: iso };
+}
+
 function normalize(r, engine) {
   const str = v => (typeof v === 'string' ? v.trim() : '');
-  const date = /^\d{4}-\d{2}-\d{2}$/.test(str(r.date)) ? str(r.date) : '';
+  const checked = plausibleDate(/^\d{4}-\d{2}-\d{2}$/.test(str(r.date)) ? str(r.date) : '');
+  const date = checked.date;
+  if (checked.fixedFrom) r.remark = [str(r.remark), `Année lue « ${checked.fixedFrom.slice(0, 4)} » corrigée en ${date.slice(0, 4)} : vérifiez la date.`].filter(Boolean).join(' ');
   const currency = /^[A-Z]{3}$/.test(str(r.currency).toUpperCase()) ? str(r.currency).toUpperCase() : 'EUR';
   return {
     isReceipt: r.isReceipt !== false,

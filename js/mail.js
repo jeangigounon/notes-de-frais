@@ -5,8 +5,9 @@ import { state, saveExpense } from './store.js';
 import { buildReport, fillPlaceholders } from './fields.js';
 import { buildSimple, fillTemplate } from './xlsx.js';
 import { getJSZip } from './lib.js';
-import { blobToBase64, safeFileName, todayISO } from './ui.js';
+import { blobToBase64, safeFileName, todayISO, parseISO } from './ui.js';
 import { rateToEur } from './fx.js';
+import { mappingMissesGroups } from './templateAuto.js';
 
 export const splitEmails = s => String(s || '').split(/[,;\s]+/).map(x => x.trim()).filter(Boolean);
 export const isEmail = s => /^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(s);
@@ -51,10 +52,16 @@ export async function buildAttachments(client, report) {
       }
     }
     sheets = await fillTemplate(excel.template, report, baseName);
+    const missed = mappingMissesGroups(excel.template, sheets.content);
+    if (missed) sheets.warnings.unshift(`Le modèle répartit les montants par type (${missed.groups.map(g => g.name).join(', ')}) mais tous les montants vont dans une seule colonne. Corrigez la configuration : Clients › ${client.name} › Analyser à nouveau.`);
   } else if (excel.mode !== 'none') {
     sheets = await buildSimple(excel.simple, report, baseName);
   }
   const warnings = [...(sheets.warnings || [])];
+  for (const it of report.items) {
+    const d = parseISO(it.date);
+    if (d && (Date.now() - d) / 86400000 > 365) warnings.push(`« ${it.merchant || 'Justificatif ' + it.index} » est daté du ${d.toLocaleDateString('fr-BE')} : vérifiez l'année.`);
+  }
   const receipts = [];
   if (client.attachReceipts !== false) {
     for (const it of report.items) {

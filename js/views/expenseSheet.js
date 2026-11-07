@@ -1,7 +1,7 @@
 // Fiche d'un justificatif : aperçu, proposition de l'IA, correction, ajout à la note d'un client.
 
 import { state, getExpense, saveExpense, deleteExpense, activeClients, getClient, onChange, saveSettings, pendingExpenses } from '../store.js';
-import { esc, icon, openSheet, confirmDialog, toast, numStr, fmtDate, spinner, money, isTouch } from '../ui.js';
+import { esc, icon, openSheet, confirmDialog, toast, numStr, fmtDate, spinner, money, isTouch, parseISO } from '../ui.js';
 import { CATEGORIES, DOC_TYPES, PAYMENTS, CURRENCIES, CLIENT_COLORS, num, amounts, round2 } from '../fields.js';
 import { analyzeExpense } from '../ai.js';
 import { rateToEur } from '../fx.js';
@@ -112,6 +112,7 @@ export function openExpenseSheet(id, { isNew = false } = {}) {
       <label class="field"><span>Devise</span><select data-f="currency">${CURRENCIES.map(c => `<option ${c === (exp.data.currency || 'EUR') ? 'selected' : ''}>${c}</option>`).join('')}</select></label>
       <label class="field" data-rate-row><span>Taux de change</span><input data-f="rate" inputmode="decimal" autocomplete="off" placeholder="Taux BCE" value="${esc(rateStr(num(exp.data.rate)))}"></label>
     </div>
+    <p class="group-foot warn-text" data-date-warn hidden></p>
 
     <details class="more">
       <summary>${icon('chevronDown')}TVA et détails</summary>
@@ -167,8 +168,18 @@ export function openExpenseSheet(id, { isNew = false } = {}) {
     updateCurrency();
   };
 
+  // Date de plus d'un an ou dans le futur : souvent une année mal lue.
+  const checkDate = () => {
+    const el = body.querySelector('[data-date-warn]');
+    const d = parseISO(input('date').value);
+    const days = d ? (Date.now() - d) / 86400000 : 0;
+    el.hidden = !d || (days <= 365 && days >= -7);
+    if (!el.hidden) el.textContent = `Date du ${d.toLocaleDateString('fr-BE')} : est-ce bien la bonne année ?`;
+  };
+
   fitAmount();
   updateCurrency();
+  checkDate();
   if ((exp.data.currency || 'EUR') !== 'EUR' && !exp.data.rate) refreshRate();
 
   // PDF : la vignette est petite, on affiche une version plus nette de la 1re page.
@@ -217,6 +228,7 @@ export function openExpenseSheet(id, { isNew = false } = {}) {
       }
       fitAmount();
       refreshRate();
+      checkDate();
       const derived = amounts(fresh.data);
       if (derived.vat != null && !input('vat').value) input('vat').placeholder = numStr(derived.vat);
       if (derived.net != null && !input('net').value) input('net').placeholder = numStr(derived.net);
@@ -235,7 +247,7 @@ export function openExpenseSheet(id, { isNew = false } = {}) {
     if (!f) return;
     touched.add(f);
     if (f === 'currency') { touched.delete('rate'); input('rate').value = ''; refreshRate(); }
-    if (f === 'date' && !touched.has('rate')) refreshRate();
+    if (f === 'date') { checkDate(); if (!touched.has('rate')) refreshRate(); }
   };
 
   const notifyAdded = c => {

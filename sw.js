@@ -2,7 +2,7 @@
 // Fichiers du site : réseau d'abord (mises à jour immédiates), cache en secours.
 // Bibliothèques externes (versions figées) : cache d'abord.
 
-const VERSION = 'ndf-v5';
+const VERSION = 'ndf-v6';
 const SHELL = [
   './',
   'index.html',
@@ -25,6 +25,7 @@ const SHELL = [
   'js/pdf.js',
   'js/fx.js',
   'js/templateAI.js',
+  'js/templateAuto.js',
   'js/views/home.js',
   'js/views/expenses.js',
   'js/views/expenseSheet.js',

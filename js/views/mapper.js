@@ -204,12 +204,12 @@ export async function openMapper(client, onDone) {
     sheet.body.innerHTML = `
       ${ai?.summary ? `
         <div class="ai-box">
-          <div class="ai-box-head">${icon('sparkles')}<strong>Analyse de Claude</strong><span>vérifiez puis touchez « Terminé »</span></div>
+          <div class="ai-box-head">${icon('sparkles')}<strong>${ai.engine === 'auto' ? 'Lecture automatique du modèle' : 'Analyse de Claude'}</strong><span>vérifiez puis touchez « Terminé »</span></div>
           <p>${esc(ai.summary)}</p>
           ${ai.warnings?.length ? `<ul>${ai.warnings.map(w => `<li>${esc(w)}</li>`).join('')}</ul>` : ''}
         </div>` : ai?.error ? `
         <div class="ai-box error">
-          <div class="ai-box-head">${icon('alert')}<strong>L'analyse par Claude a échoué</strong></div>
+          <div class="ai-box-head">${icon('alert')}<strong>L'analyse du modèle a échoué</strong></div>
           <p>${esc(ai.error)} Vous pouvez configurer les cellules à la main ci-dessous, ou relancer l'analyse depuis la fiche du client.</p>
         </div>` : ''}
       <div class="mapper">
